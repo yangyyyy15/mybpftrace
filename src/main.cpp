@@ -975,6 +975,7 @@ int main(int argc, char* argv[])
 
   pm.add(ast::CreateLLVMInitPass());
   pm.add(ast::CreateCompilePass());
+  pm.add(ast::CreateExternInlinerPass());
   if (bt_debug.contains(DebugStage::Codegen)) {
     pm.add(ast::Pass::create("dump-ir-prefix", [&] {
       std::cout << "LLVM IR before optimization\n";

@@ -900,6 +900,9 @@ void SemanticAnalyser::visit(Call &call)
     check_arg(call, Type::integer, 0);
 
     call.type = CreateHist();
+  } else if (call.func == "ntohs") {
+    // Sample: just hard-code the type.
+    call.type = CreateInt(16);
   } else if (call.func == "lhist") {
     check_assignment(call, true, false, false);
     if (check_nargs(call, 4)) {
