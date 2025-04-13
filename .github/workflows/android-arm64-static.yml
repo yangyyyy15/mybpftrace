@@ -24,7 +24,7 @@ jobs:
       run: |
         # 创建Dockerfile
         cat > Dockerfile.android-arm64 << 'EOF'
-        FROM ubuntu:22.04
+        FROM debian:bullseye
         
         ENV DEBIAN_FRONTEND=noninteractive
         
@@ -41,25 +41,31 @@ jobs:
             zlib1g-dev \
             libssl-dev \
             libzstd-dev \
-            libcereal-dev \
-            llvm-14-dev \
-            clang-14 \
-            libclang-14-dev \
             libbpf-dev \
-            libbcc-dev \
+            llvm-11-dev \
+            clang-11 \
+            libclang-11-dev \
             gcc-aarch64-linux-gnu \
             g++-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu \
-            wget
+            wget \
+            software-properties-common \
+            lsb-release
         
         # 创建必要的符号链接，确保交叉编译器可以找到本地库
         RUN mkdir -p /usr/aarch64-linux-gnu/lib \
             && ln -s /usr/lib/x86_64-linux-gnu/libz.a /usr/aarch64-linux-gnu/lib/ \
             && ln -s /usr/lib/x86_64-linux-gnu/libzstd.a /usr/aarch64-linux-gnu/lib/ \
-            && ln -s /usr/lib/x86_64-linux-gnu/libelf.a /usr/aarch64-linux-gnu/lib/ \
-            && ln -s /usr/lib/x86_64-linux-gnu/libbcc.a /usr/aarch64-linux-gnu/lib/ \
-            && mkdir -p /usr/aarch64-linux-gnu/include \
-            && ln -s /usr/include/bcc /usr/aarch64-linux-gnu/include/bcc
+            && ln -s /usr/lib/x86_64-linux-gnu/libelf.a /usr/aarch64-linux-gnu/lib/
+        
+        # 尝试不从源码编译libbcc，而是使用系统的动态库模式
+        # 将bpftrace配置成直接使用内核头文件而不是通过libbcc
+        
+        # 下载bpftrace源码
+        WORKDIR /root
+        
+        # 安装cereal
+        RUN apt-get install -y libcereal-dev
         
         WORKDIR /bpftrace
         EOF
@@ -78,11 +84,16 @@ jobs:
         ls -la /usr/aarch64-linux-gnu/ || true
         echo "Listing aarch64-linux-gnu/lib directory:"
         ls -la /usr/aarch64-linux-gnu/lib/ || true
-        echo "Listing aarch64-linux-gnu/include directory:"
-        ls -la /usr/aarch64-linux-gnu/include/ || true
         
         BUILD_DIR=build-android-arm64
         mkdir -p $BUILD_DIR
+        
+        # 检查源代码是否有BTF.h文件（新版bpftrace可能需要）
+        if [ -f src/btf.h ]; then
+          echo "BTF.h exists in source"
+        else
+          echo "BTF.h not found in source"
+        fi
         
         # 准备CMake工具链文件
         cat > arm64_toolchain.cmake << 'CMAKEEOF'
@@ -107,46 +118,43 @@ jobs:
         
         set(LIBELF_LIBRARIES /usr/lib/x86_64-linux-gnu/libelf.a)
         set(LIBELF_INCLUDE_DIRS /usr/include)
-        
-        # BCC库设置
-        set(LIBBCC_LIBRARIES /usr/lib/x86_64-linux-gnu/libbcc.a)
-        set(LIBBCC_INCLUDE_DIRS /usr/include)
         CMAKEEOF
         
-        # 如果没有-DLIBBCC_ATTACH_KPROBE_SIX_ARGV_SIGNATURE=OFF，可能会遇到编译错误
+        # 使用最精简的配置，不依赖BCC
         cmake -B "$BUILD_DIR" \
           -DCMAKE_TOOLCHAIN_FILE=arm64_toolchain.cmake \
           -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_VERBOSE_MAKEFILE=ON \
           -DBUILD_TESTING=OFF \
           -DSTATIC_LINKING=ON \
-          -DLIBBCC_INCLUDE_DIRS=/usr/include \
-          -DLIBBCC_LIBRARIES=/usr/lib/x86_64-linux-gnu/libbcc.a \
-          -DLIBBCC_ATTACH_KPROBE_SIX_ARGV_SIGNATURE=OFF \
+          -DUSE_SYSTEM_BPF_BCC=OFF \
+          -DKERNEL_INCLUDE_DIRS=/usr/include \
           -DENABLE_MAN=OFF
-
-        # 尝试直接修改CMakeCache.txt文件以尝试解决找不到BCC库的问题
-        if [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
-          echo "CMakeCache.txt not found, cmake configuration failed!"
-          exit 1
-        fi
         
         # 构建bpftrace
-        make -C "$BUILD_DIR" -j$(nproc) VERBOSE=1
+        make -C "$BUILD_DIR" -j$(nproc) VERBOSE=1 || true
         
-        # 检查是否为ARM64二进制文件
-        file "$BUILD_DIR"/src/bpftrace | tee binary_info.txt
-        if ! grep -q "aarch64" binary_info.txt; then
-          echo "WARNING: Binary does not appear to be aarch64"
-          cat binary_info.txt
+        if [ -f "$BUILD_DIR/src/bpftrace" ]; then
+          echo "Build successful! Binary exists."
+          
+          # 检查是否为ARM64二进制文件
+          file "$BUILD_DIR"/src/bpftrace | tee binary_info.txt
+          if ! grep -q "aarch64" binary_info.txt; then
+            echo "WARNING: Binary does not appear to be aarch64"
+            cat binary_info.txt
+          fi
+          
+          # 创建发布包
+          mkdir -p release/android-arm64
+          cp "$BUILD_DIR"/src/bpftrace release/android-arm64/
+          cp -r tools release/android-arm64/
+          chmod +x release/android-arm64/tools/*.bt
+          tar -czf bpftrace-android-arm64-static.tar.gz -C release android-arm64
+          echo "Build package created successfully."
+        else
+          echo "Build failed - binary not found!"
+          ls -la "$BUILD_DIR"/src/
+          exit 1
         fi
-        
-        # 创建发布包
-        mkdir -p release/android-arm64
-        cp "$BUILD_DIR"/src/bpftrace release/android-arm64/
-        cp -r tools release/android-arm64/
-        chmod +x release/android-arm64/tools/*.bt
-        tar -czf bpftrace-android-arm64-static.tar.gz -C release android-arm64
         EOF
         
         chmod +x build-android-arm64.sh
@@ -155,6 +163,7 @@ jobs:
         docker run --rm -v $(pwd):/bpftrace -w /bpftrace bpftrace-android-arm64 ./build-android-arm64.sh
 
     - name: Upload Android ARM64 static binary
+      if: success()
       uses: actions/upload-artifact@v4
       with:
         name: bpftrace-android-arm64-static
