@@ -20,7 +20,6 @@ jobs:
       with:
         fetch-depth: 0
 
-    # 使用ubuntu基础镜像和交叉编译方法
     - name: Build Android ARM64 static binary
       run: |
         # 创建Dockerfile
@@ -49,13 +48,32 @@ jobs:
             libbpf-dev \
             gcc-aarch64-linux-gnu \
             g++-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu
+            binutils-aarch64-linux-gnu \
+            ninja-build
         
         # 创建一些必要的符号链接，确保交叉编译器可以找到本地库
         RUN mkdir -p /usr/aarch64-linux-gnu/lib \
             && ln -s /usr/lib/x86_64-linux-gnu/libz.a /usr/aarch64-linux-gnu/lib/ \
             && ln -s /usr/lib/x86_64-linux-gnu/libzstd.a /usr/aarch64-linux-gnu/lib/ \
             && ln -s /usr/lib/x86_64-linux-gnu/libelf.a /usr/aarch64-linux-gnu/lib/
+        
+        # 从源码编译BCC
+        WORKDIR /src
+        RUN git clone https://github.com/iovisor/bcc.git && \
+            mkdir -p bcc/build && \
+            cd bcc/build && \
+            cmake -G Ninja .. \
+                -DCMAKE_INSTALL_PREFIX=/usr \
+                -DENABLE_EXAMPLES=OFF \
+                -DENABLE_MAN=OFF \
+                -DENABLE_TESTS=OFF && \
+            ninja && \
+            ninja install
+            
+        # 创建BCC库的软链接供ARM64使用
+        RUN mkdir -p /usr/aarch64-linux-gnu/include && \
+            ln -s /usr/include/bcc /usr/aarch64-linux-gnu/include/bcc && \
+            ln -s /usr/lib/x86_64-linux-gnu/libbcc.a /usr/aarch64-linux-gnu/lib/libbcc.a
         
         WORKDIR /bpftrace
         EOF
@@ -94,6 +112,10 @@ jobs:
         
         set(LIBELF_LIBRARIES /usr/lib/x86_64-linux-gnu/libelf.a)
         set(LIBELF_INCLUDE_DIRS /usr/include)
+        
+        # BCC库设置
+        set(LIBBCC_LIBRARIES /usr/lib/x86_64-linux-gnu/libbcc.a)
+        set(LIBBCC_INCLUDE_DIRS /usr/include)
         CMAKEEOF
         
         # 配置交叉编译
@@ -102,7 +124,9 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_VERBOSE_MAKEFILE=ON \
           -DBUILD_TESTING=OFF \
-          -DSTATIC_LINKING=ON
+          -DSTATIC_LINKING=ON \
+          -DLIBBCC_INCLUDE_DIRS=/usr/include \
+          -DLIBBCC_LIBRARIES=/usr/lib/x86_64-linux-gnu/libbcc.a
         
         # 构建bpftrace
         make -C "$BUILD_DIR" -j$(nproc)
