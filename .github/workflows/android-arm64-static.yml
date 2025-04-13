@@ -27,95 +27,95 @@ jobs:
       run: |
         # Create Dockerfile for ARM64 cross-compilation
         cat > Dockerfile.android-arm64 << 'EOF'
-FROM alpine:3.21
+        FROM alpine:3.21
 
-# Install cross-compilation tools and dependencies
-RUN apk add --update \
-  asciidoctor \
-  argp-standalone \
-  bash \
-  bcc-dev \
-  bcc-static \
-  binutils-dev \
-  bison \
-  bzip2-static \
-  build-base \
-  cereal \
-  clang18-dev \
-  clang18-extra-tools \
-  clang18-static \
-  cmake \
-  elfutils-dev \
-  flex-dev \
-  git \
-  libbpf-dev \
-  libelf-static \
-  libpcap-dev \
-  libc6-compat \
-  linux-headers \
-  llvm18-dev \
-  llvm18-gtest \
-  llvm18-static \
-  musl-obstack-dev \
-  openssl-dev \
-  pahole \
-  procps \
-  python3 \
-  wget \
-  xxd \
-  xz-static \
-  zlib-dev \
-  zlib-static \
-  zstd-dev \
-  zstd-static \
-  gcc-aarch64 \
-  g++-aarch64 \
-  aarch64-none-linux-musl-dev
+        # Install cross-compilation tools and dependencies
+        RUN apk add --update \
+          asciidoctor \
+          argp-standalone \
+          bash \
+          bcc-dev \
+          bcc-static \
+          binutils-dev \
+          bison \
+          bzip2-static \
+          build-base \
+          cereal \
+          clang18-dev \
+          clang18-extra-tools \
+          clang18-static \
+          cmake \
+          elfutils-dev \
+          flex-dev \
+          git \
+          libbpf-dev \
+          libelf-static \
+          libpcap-dev \
+          libc6-compat \
+          linux-headers \
+          llvm18-dev \
+          llvm18-gtest \
+          llvm18-static \
+          musl-obstack-dev \
+          openssl-dev \
+          pahole \
+          procps \
+          python3 \
+          wget \
+          xxd \
+          xz-static \
+          zlib-dev \
+          zlib-static \
+          zstd-dev \
+          zstd-static \
+          gcc-aarch64 \
+          g++-aarch64 \
+          aarch64-none-linux-musl-dev
 
-# Work around zstd dynamic linking issue
-RUN sed -i 's/libzstd_shared/libzstd_static/g' /usr/lib/llvm18/lib/cmake/llvm/LLVMExports.cmake
+        # Work around zstd dynamic linking issue
+        RUN sed -i 's/libzstd_shared/libzstd_static/g' /usr/lib/llvm18/lib/cmake/llvm/LLVMExports.cmake
 
-# Create clang symlink
-RUN ln -s 'clang18' /usr/lib/cmake/clang
+        # Create clang symlink
+        RUN ln -s 'clang18' /usr/lib/cmake/clang
 
-WORKDIR /bpftrace
-EOF
+        WORKDIR /bpftrace
+        EOF
         
         # Build the Docker image for cross-compilation
         docker build -t bpftrace-android-arm64 -f Dockerfile.android-arm64 .
         
         # Create script to build bpftrace statically for ARM64
         cat > build-android-arm64.sh << 'EOF'
-#!/bin/bash
-set -eux
+        #!/bin/bash
+        set -eux
 
-BUILD_DIR=build-android-arm64
-mkdir -p $BUILD_DIR
+        BUILD_DIR=build-android-arm64
+        mkdir -p $BUILD_DIR
 
-# Configure for ARM64 cross-compilation
-cmake -B "$BUILD_DIR" \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_VERBOSE_MAKEFILE=ON \
-  -DBUILD_TESTING=OFF \
-  -DSTATIC_LINKING=ON \
-  -DCMAKE_C_COMPILER=aarch64-none-linux-musl-gcc \
-  -DCMAKE_CXX_COMPILER=aarch64-none-linux-musl-g++ \
-  -DCMAKE_SYSTEM_NAME=Linux \
-  -DCMAKE_SYSTEM_PROCESSOR=aarch64
+        # Configure for ARM64 cross-compilation
+        cmake -B "$BUILD_DIR" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_VERBOSE_MAKEFILE=ON \
+          -DBUILD_TESTING=OFF \
+          -DSTATIC_LINKING=ON \
+          -DCMAKE_C_COMPILER=aarch64-none-linux-musl-gcc \
+          -DCMAKE_CXX_COMPILER=aarch64-none-linux-musl-g++ \
+          -DCMAKE_SYSTEM_NAME=Linux \
+          -DCMAKE_SYSTEM_PROCESSOR=aarch64
 
-# Build bpftrace
-make -C "$BUILD_DIR" -j$(nproc)
+        # Build bpftrace
+        make -C "$BUILD_DIR" -j$(nproc)
 
-# Verify it's an ARM64 binary
-file "$BUILD_DIR"/src/bpftrace | grep -q "aarch64"
+        # Verify it's an ARM64 binary
+        file "$BUILD_DIR"/src/bpftrace | grep -q "aarch64"
 
-# Create a release package
-mkdir -p release/android-arm64
-cp "$BUILD_DIR"/src/bpftrace release/android-arm64/
-cp -r tools release/android-arm64/
-chmod +x release/android-arm64/tools/*.bt
-tar -czf bpftrace-android-arm64-static.tar.gz -C release android-arm64
-EOF
+        # Create a release package
+        mkdir -p release/android-arm64
+        cp "$BUILD_DIR"/src/bpftrace release/android-arm64/
+        cp -r tools release/android-arm64/
+        chmod +x release/android-arm64/tools/*.bt
+        tar -czf bpftrace-android-arm64-static.tar.gz -C release android-arm64
+        EOF
         
         chmod +x build-android-arm64.sh
         
