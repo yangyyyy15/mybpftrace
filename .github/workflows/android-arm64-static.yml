@@ -46,34 +46,20 @@ jobs:
             clang-14 \
             libclang-14-dev \
             libbpf-dev \
+            libbcc-dev \
             gcc-aarch64-linux-gnu \
             g++-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu \
-            ninja-build
+            wget
         
-        # 创建一些必要的符号链接，确保交叉编译器可以找到本地库
+        # 创建必要的符号链接，确保交叉编译器可以找到本地库
         RUN mkdir -p /usr/aarch64-linux-gnu/lib \
             && ln -s /usr/lib/x86_64-linux-gnu/libz.a /usr/aarch64-linux-gnu/lib/ \
             && ln -s /usr/lib/x86_64-linux-gnu/libzstd.a /usr/aarch64-linux-gnu/lib/ \
-            && ln -s /usr/lib/x86_64-linux-gnu/libelf.a /usr/aarch64-linux-gnu/lib/
-        
-        # 从源码编译BCC
-        WORKDIR /src
-        RUN git clone https://github.com/iovisor/bcc.git && \
-            mkdir -p bcc/build && \
-            cd bcc/build && \
-            cmake -G Ninja .. \
-                -DCMAKE_INSTALL_PREFIX=/usr \
-                -DENABLE_EXAMPLES=OFF \
-                -DENABLE_MAN=OFF \
-                -DENABLE_TESTS=OFF && \
-            ninja && \
-            ninja install
-            
-        # 创建BCC库的软链接供ARM64使用
-        RUN mkdir -p /usr/aarch64-linux-gnu/include && \
-            ln -s /usr/include/bcc /usr/aarch64-linux-gnu/include/bcc && \
-            ln -s /usr/lib/x86_64-linux-gnu/libbcc.a /usr/aarch64-linux-gnu/lib/libbcc.a
+            && ln -s /usr/lib/x86_64-linux-gnu/libelf.a /usr/aarch64-linux-gnu/lib/ \
+            && ln -s /usr/lib/x86_64-linux-gnu/libbcc.a /usr/aarch64-linux-gnu/lib/ \
+            && mkdir -p /usr/aarch64-linux-gnu/include \
+            && ln -s /usr/include/bcc /usr/aarch64-linux-gnu/include/bcc
         
         WORKDIR /bpftrace
         EOF
@@ -86,10 +72,19 @@ jobs:
         #!/bin/bash
         set -eux
         
+        # 显示环境信息以便调试
+        echo "Environment setup:"
+        echo "Listing aarch64-linux-gnu directory:"
+        ls -la /usr/aarch64-linux-gnu/ || true
+        echo "Listing aarch64-linux-gnu/lib directory:"
+        ls -la /usr/aarch64-linux-gnu/lib/ || true
+        echo "Listing aarch64-linux-gnu/include directory:"
+        ls -la /usr/aarch64-linux-gnu/include/ || true
+        
         BUILD_DIR=build-android-arm64
         mkdir -p $BUILD_DIR
         
-        # 准备一个简单的CMake工具链文件
+        # 准备CMake工具链文件
         cat > arm64_toolchain.cmake << 'CMAKEEOF'
         set(CMAKE_SYSTEM_NAME Linux)
         set(CMAKE_SYSTEM_PROCESSOR aarch64)
@@ -118,7 +113,7 @@ jobs:
         set(LIBBCC_INCLUDE_DIRS /usr/include)
         CMAKEEOF
         
-        # 配置交叉编译
+        # 如果没有-DLIBBCC_ATTACH_KPROBE_SIX_ARGV_SIGNATURE=OFF，可能会遇到编译错误
         cmake -B "$BUILD_DIR" \
           -DCMAKE_TOOLCHAIN_FILE=arm64_toolchain.cmake \
           -DCMAKE_BUILD_TYPE=Release \
@@ -126,13 +121,25 @@ jobs:
           -DBUILD_TESTING=OFF \
           -DSTATIC_LINKING=ON \
           -DLIBBCC_INCLUDE_DIRS=/usr/include \
-          -DLIBBCC_LIBRARIES=/usr/lib/x86_64-linux-gnu/libbcc.a
+          -DLIBBCC_LIBRARIES=/usr/lib/x86_64-linux-gnu/libbcc.a \
+          -DLIBBCC_ATTACH_KPROBE_SIX_ARGV_SIGNATURE=OFF \
+          -DENABLE_MAN=OFF
+
+        # 尝试直接修改CMakeCache.txt文件以尝试解决找不到BCC库的问题
+        if [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
+          echo "CMakeCache.txt not found, cmake configuration failed!"
+          exit 1
+        fi
         
         # 构建bpftrace
-        make -C "$BUILD_DIR" -j$(nproc)
+        make -C "$BUILD_DIR" -j$(nproc) VERBOSE=1
         
         # 检查是否为ARM64二进制文件
-        file "$BUILD_DIR"/src/bpftrace | grep -q "aarch64" || echo "WARNING: Binary does not appear to be aarch64"
+        file "$BUILD_DIR"/src/bpftrace | tee binary_info.txt
+        if ! grep -q "aarch64" binary_info.txt; then
+          echo "WARNING: Binary does not appear to be aarch64"
+          cat binary_info.txt
+        fi
         
         # 创建发布包
         mkdir -p release/android-arm64
@@ -160,6 +167,8 @@ jobs:
         name: Android ARM64 Static Build
         tag_name: android-arm64-static-${{ github.run_number }}
         files: bpftrace-android-arm64-static.tar.gz
+        draft: false
+        prerelease: false
         generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
