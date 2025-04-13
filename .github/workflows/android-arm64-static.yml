@@ -24,9 +24,10 @@ jobs:
       run: |
         # 创建Dockerfile
         cat > Dockerfile.android-arm64 << 'EOF'
-        FROM debian:bullseye
+        FROM ubuntu:22.04
         
         ENV DEBIAN_FRONTEND=noninteractive
+        ENV TZ=Etc/UTC
         
         # 安装基本工具和交叉编译工具链
         RUN apt-get update && apt-get install -y \
@@ -42,30 +43,50 @@ jobs:
             libssl-dev \
             libzstd-dev \
             libbpf-dev \
-            llvm-11-dev \
-            clang-11 \
-            libclang-11-dev \
+            binutils-dev \
+            llvm-14-dev \
+            clang-14 \
+            libclang-14-dev \
             gcc-aarch64-linux-gnu \
             g++-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu \
             wget \
             software-properties-common \
-            lsb-release
+            lsb-release \
+            libcereal-dev \
+            kmod \
+            liblzma-dev \
+            libiberty-dev \
+            libtinfo-dev \
+            systemtap-sdt-dev \
+            libzstd-dev \
+            xz-utils
         
-        # 创建必要的符号链接，确保交叉编译器可以找到本地库
+        # 创建必要的符号链接
         RUN mkdir -p /usr/aarch64-linux-gnu/lib \
             && ln -s /usr/lib/x86_64-linux-gnu/libz.a /usr/aarch64-linux-gnu/lib/ \
             && ln -s /usr/lib/x86_64-linux-gnu/libzstd.a /usr/aarch64-linux-gnu/lib/ \
             && ln -s /usr/lib/x86_64-linux-gnu/libelf.a /usr/aarch64-linux-gnu/lib/
         
-        # 尝试不从源码编译libbcc，而是使用系统的动态库模式
-        # 将bpftrace配置成直接使用内核头文件而不是通过libbcc
-        
-        # 下载bpftrace源码
-        WORKDIR /root
-        
-        # 安装cereal
-        RUN apt-get install -y libcereal-dev
+        # 从源码编译BCC
+        WORKDIR /src
+        RUN git clone https://github.com/iovisor/bcc.git && \
+            cd bcc && \
+            mkdir build && \
+            cd build && \
+            cmake -DCMAKE_INSTALL_PREFIX=/usr \
+                  -DENABLE_EXAMPLES=OFF \
+                  -DENABLE_MAN=OFF \
+                  -DENABLE_TESTS=OFF \
+                  -DENABLE_STATIC_LINKING=ON \
+                  .. && \
+            make -j$(nproc) && \
+            make install
+            
+        # 创建BCC库的软链接
+        RUN mkdir -p /usr/aarch64-linux-gnu/include && \
+            ln -s /usr/include/bcc /usr/aarch64-linux-gnu/include/ && \
+            ln -s /usr/lib/x86_64-linux-gnu/libbcc.a /usr/aarch64-linux-gnu/lib/libbcc.a
         
         WORKDIR /bpftrace
         EOF
@@ -78,22 +99,15 @@ jobs:
         #!/bin/bash
         set -eux
         
-        # 显示环境信息以便调试
-        echo "Environment setup:"
-        echo "Listing aarch64-linux-gnu directory:"
-        ls -la /usr/aarch64-linux-gnu/ || true
-        echo "Listing aarch64-linux-gnu/lib directory:"
-        ls -la /usr/aarch64-linux-gnu/lib/ || true
+        # 显示环境信息
+        echo "Environment information:"
+        echo "BCC library location:"
+        ls -la /usr/lib/*/libbcc* || true
+        echo "BCC include location:"
+        ls -la /usr/include/bcc || true
         
         BUILD_DIR=build-android-arm64
         mkdir -p $BUILD_DIR
-        
-        # 检查源代码是否有BTF.h文件（新版bpftrace可能需要）
-        if [ -f src/btf.h ]; then
-          echo "BTF.h exists in source"
-        else
-          echo "BTF.h not found in source"
-        fi
         
         # 准备CMake工具链文件
         cat > arm64_toolchain.cmake << 'CMAKEEOF'
@@ -118,21 +132,27 @@ jobs:
         
         set(LIBELF_LIBRARIES /usr/lib/x86_64-linux-gnu/libelf.a)
         set(LIBELF_INCLUDE_DIRS /usr/include)
+        
+        # BCC设置
+        set(LIBBCC_LIBRARIES /usr/lib/x86_64-linux-gnu/libbcc.a)
+        set(LIBBCC_INCLUDE_DIRS /usr/include)
         CMAKEEOF
         
-        # 使用最精简的配置，不依赖BCC
+        # 配置bpftrace构建
         cmake -B "$BUILD_DIR" \
           -DCMAKE_TOOLCHAIN_FILE=arm64_toolchain.cmake \
           -DCMAKE_BUILD_TYPE=Release \
           -DBUILD_TESTING=OFF \
           -DSTATIC_LINKING=ON \
-          -DUSE_SYSTEM_BPF_BCC=OFF \
-          -DKERNEL_INCLUDE_DIRS=/usr/include \
-          -DENABLE_MAN=OFF
+          -DENABLE_MAN=OFF \
+          -DLIBBCC_INCLUDE_DIRS=/usr/include \
+          -DLIBBCC_LIBRARIES=/usr/lib/x86_64-linux-gnu/libbcc.a \
+          -DKERNEL_INCLUDE_DIRS=/usr/include
         
         # 构建bpftrace
-        make -C "$BUILD_DIR" -j$(nproc) VERBOSE=1 || true
+        make -C "$BUILD_DIR" -j$(nproc)
         
+        # 检查是否生成了bpftrace可执行文件
         if [ -f "$BUILD_DIR/src/bpftrace" ]; then
           echo "Build successful! Binary exists."
           
