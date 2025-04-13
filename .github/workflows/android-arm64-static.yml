@@ -31,8 +31,12 @@ jobs:
         
         ENV DEBIAN_FRONTEND=noninteractive
         
+        # Add ARM64 architecture and repositories
+        RUN dpkg --add-architecture arm64 && \
+            apt-get update
+
         # Install cross-compilation tools and dependencies
-        RUN apt-get update && apt-get install -y \
+        RUN apt-get install -y \
             build-essential \
             cmake \
             git \
@@ -41,18 +45,21 @@ jobs:
             bison \
             flex \
             libelf-dev \
-            zlib1g-dev \
-            libssl-dev \
-            libzstd-dev \
-            libcereal-dev \
-            libbpf-dev \
-            llvm-14-dev \
-            clang-14 \
-            libclang-14-dev \
             crossbuild-essential-arm64 \
             gcc-aarch64-linux-gnu \
             g++-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu
+
+        # Install ARM64 libraries
+        RUN apt-get install -y \
+            zlib1g-dev:arm64 \
+            libssl-dev:arm64 \
+            libzstd-dev:arm64 \
+            libelf-dev:arm64 \
+            libbpf-dev:arm64 \
+            llvm-14-dev:arm64 \
+            clang-14:arm64 \
+            libclang-14-dev:arm64
         
         WORKDIR /bpftrace
         EOF
@@ -68,7 +75,7 @@ jobs:
         BUILD_DIR=build-android-arm64
         mkdir -p $BUILD_DIR
         
-        # Configure for ARM64 cross-compilation
+        # Configure for ARM64 cross-compilation with explicit library paths
         cmake -B "$BUILD_DIR" \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_VERBOSE_MAKEFILE=ON \
@@ -77,7 +84,10 @@ jobs:
           -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
           -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
           -DCMAKE_SYSTEM_NAME=Linux \
-          -DCMAKE_SYSTEM_PROCESSOR=aarch64
+          -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+          -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
+          -DCMAKE_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu \
+          -DCMAKE_INCLUDE_PATH=/usr/include/aarch64-linux-gnu
         
         # Build bpftrace
         make -C "$BUILD_DIR" -j$(nproc)
@@ -103,3 +113,14 @@ jobs:
       with:
         name: bpftrace-android-arm64-static
         path: bpftrace-android-arm64-static.tar.gz
+        
+    - name: Create Release
+      if: success()
+      uses: softprops/action-gh-release@v1
+      with:
+        name: Android ARM64 Static Build
+        tag_name: android-arm64-static-${{ github.run_number }}
+        files: bpftrace-android-arm64-static.tar.gz
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
