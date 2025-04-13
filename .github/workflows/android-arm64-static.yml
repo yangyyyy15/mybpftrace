@@ -1,0 +1,105 @@
+name: "Android ARM64 Static Build"
+
+on:
+  push:
+    branches: [ master, release/* ]
+  pull_request:
+  # Allow manual triggering
+  workflow_dispatch:
+
+# Cancel previous run if a new one is started
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-android-arm64:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build Android ARM64 static binary
+      run: |
+        # Create Dockerfile for ARM64 cross-compilation
+        cat > Dockerfile.android-arm64 << 'EOF'
+        FROM ubuntu:22.04
+        
+        ENV DEBIAN_FRONTEND=noninteractive
+        
+        # Install cross-compilation tools and dependencies
+        RUN apt-get update && apt-get install -y \
+            build-essential \
+            cmake \
+            git \
+            pkg-config \
+            python3 \
+            bison \
+            flex \
+            libelf-dev \
+            zlib1g-dev \
+            libssl-dev \
+            libzstd-dev \
+            libcereal-dev \
+            libbpf-dev \
+            llvm-14-dev \
+            clang-14 \
+            libclang-14-dev \
+            crossbuild-essential-arm64 \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu
+        
+        WORKDIR /bpftrace
+        EOF
+        
+        # Build the Docker image for cross-compilation
+        docker build -t bpftrace-android-arm64 -f Dockerfile.android-arm64 .
+        
+        # Create script to build bpftrace statically for ARM64
+        cat > build-android-arm64.sh << 'EOF'
+        #!/bin/bash
+        set -eux
+        
+        BUILD_DIR=build-android-arm64
+        mkdir -p $BUILD_DIR
+        
+        # Configure for ARM64 cross-compilation
+        cmake -B "$BUILD_DIR" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_VERBOSE_MAKEFILE=ON \
+          -DBUILD_TESTING=OFF \
+          -DSTATIC_LINKING=ON \
+          -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+          -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+          -DCMAKE_SYSTEM_NAME=Linux \
+          -DCMAKE_SYSTEM_PROCESSOR=aarch64
+        
+        # Build bpftrace
+        make -C "$BUILD_DIR" -j$(nproc)
+        
+        # Verify it's an ARM64 binary
+        file "$BUILD_DIR"/src/bpftrace | grep -q "aarch64"
+        
+        # Create a release package
+        mkdir -p release/android-arm64
+        cp "$BUILD_DIR"/src/bpftrace release/android-arm64/
+        cp -r tools release/android-arm64/
+        chmod +x release/android-arm64/tools/*.bt
+        tar -czf bpftrace-android-arm64-static.tar.gz -C release android-arm64
+        EOF
+        
+        chmod +x build-android-arm64.sh
+        
+        # Run the cross-compilation in Docker
+        docker run --rm -v $(pwd):/bpftrace -w /bpftrace bpftrace-android-arm64 ./build-android-arm64.sh
+
+    - name: Upload Android ARM64 static binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: bpftrace-android-arm64-static
+        path: bpftrace-android-arm64-static.tar.gz
