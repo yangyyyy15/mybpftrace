@@ -156,7 +156,7 @@ jobs:
         # Fix cstring_view.h constexpr error by completely replacing the file with a fixed version
         if [ -f "src/container/cstring_view.h" ]; then
           echo "Patching cstring_view.h..."
-          cat > src/container/cstring_view.h << 'CSTRING_VIEW_H'
+          cat > "src/container/cstring_view.h" << 'CSTRING_VIEW_H'
 #pragma once
 
 #include <string>
@@ -173,12 +173,10 @@ public:
   constexpr cstring_view() noexcept : std::string_view() { }
   
   // Constructor for C-string (const char*)
-  constexpr cstring_view(const char *str) noexcept 
-    : std::string_view(str) { }
+  constexpr cstring_view(const char *str) noexcept : std::string_view(str) { }
   
   // Constructor for std::string - cannot be constexpr due to c_str() limitations
-  cstring_view(const std::string &str) 
-    : std::string_view(str.c_str(), str.length()) { }
+  cstring_view(const std::string &str) : std::string_view(str.c_str(), str.length()) { }
   
   // Remove any constructors/operations that would
   // not guarantee the buffer is NULL terminated
