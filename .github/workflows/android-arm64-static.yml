@@ -156,7 +156,7 @@ jobs:
         # Fix cstring_view.h constexpr error by completely replacing the file with a fixed version
         if [ -f "src/container/cstring_view.h" ]; then
           echo "Patching cstring_view.h..."
-          cat > "src/container/cstring_view.h" << 'CSTRING_VIEW_H'
+          cat > src/container/cstring_view.h << EOF
 #pragma once
 
 #include <string>
@@ -183,7 +183,7 @@ public:
 };
 
 } // namespace bpftrace
-CSTRING_VIEW_H
+EOF
         fi
 
         # ======= FIX ZSTD ISSUES COMPREHENSIVELY =======
@@ -202,95 +202,95 @@ CSTRING_VIEW_H
 
         # 3. Create a comprehensive custom FindZstd.cmake
         mkdir -p cmake/custom
-        cat > cmake/custom/FindZstd.cmake << 'CMAKEFILE'
-        # Custom FindZstd.cmake file for bpftrace build
+        cat > cmake/custom/FindZstd.cmake << EOF
+# Custom FindZstd.cmake file for bpftrace build
 
-        # Find zstd include directory
-        find_path(ZSTD_INCLUDE_DIR zstd.h
-          PATHS ${ZSTD_INCLUDE_DIR} ${ZSTD_ROOT}/include /usr/include /usr/local/include
-        )
+# Find zstd include directory
+find_path(ZSTD_INCLUDE_DIR zstd.h
+  PATHS ${ZSTD_INCLUDE_DIR} ${ZSTD_ROOT}/include /usr/include /usr/local/include
+)
 
-        # Find zstd library
-        find_library(ZSTD_LIBRARY
-          NAMES zstd libzstd
-          PATHS ${ZSTD_LIBRARY} ${ZSTD_ROOT}/lib ${ZSTD_ROOT}/lib64 /usr/lib /usr/lib64 /usr/local/lib /usr/local/lib64
-        )
+# Find zstd library
+find_library(ZSTD_LIBRARY
+  NAMES zstd libzstd
+  PATHS ${ZSTD_LIBRARY} ${ZSTD_ROOT}/lib ${ZSTD_ROOT}/lib64 /usr/lib /usr/lib64 /usr/local/lib /usr/local/lib64
+)
 
-        # Standard package handling
-        include(FindPackageHandleStandardArgs)
-        find_package_handle_standard_args(zstd DEFAULT_MSG ZSTD_LIBRARY ZSTD_INCLUDE_DIR)
+# Standard package handling
+include(FindPackageHandleStandardArgs)
+find_package_handle_standard_args(zstd DEFAULT_MSG ZSTD_LIBRARY ZSTD_INCLUDE_DIR)
 
-        # Set up the imported target
-        if(zstd_FOUND)
-          if(NOT TARGET zstd)
-            add_library(zstd STATIC IMPORTED)
-            set_target_properties(zstd PROPERTIES
-              IMPORTED_LOCATION "${ZSTD_LIBRARY}"
-              INTERFACE_INCLUDE_DIRECTORIES "${ZSTD_INCLUDE_DIR}"
-            )
-          endif()
-          
-          # Create alias target that matches what the source expects
-          if(NOT TARGET zstd::libzstd_shared)
-            add_library(zstd::libzstd_shared ALIAS zstd)
-          endif()
-        endif()
+# Set up the imported target
+if(zstd_FOUND)
+  if(NOT TARGET zstd)
+    add_library(zstd STATIC IMPORTED)
+    set_target_properties(zstd PROPERTIES
+      IMPORTED_LOCATION "${ZSTD_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${ZSTD_INCLUDE_DIR}"
+    )
+  endif()
+  
+  # Create alias target that matches what the source expects
+  if(NOT TARGET zstd::libzstd_shared)
+    add_library(zstd::libzstd_shared ALIAS zstd)
+  endif()
+endif()
 
-        # Set standard variables
-        set(ZSTD_INCLUDE_DIRS ${ZSTD_INCLUDE_DIR})
-        set(ZSTD_LIBRARIES ${ZSTD_LIBRARY})
-        mark_as_advanced(ZSTD_INCLUDE_DIR ZSTD_LIBRARY)
-        CMAKEFILE
+# Set standard variables
+set(ZSTD_INCLUDE_DIRS ${ZSTD_INCLUDE_DIR})
+set(ZSTD_LIBRARIES ${ZSTD_LIBRARY})
+mark_as_advanced(ZSTD_INCLUDE_DIR ZSTD_LIBRARY)
+EOF
 
         # 4. Create a direct CMake module that defines the zstd targets before including the project
-        cat > cmake/custom/DirectZstdSetup.cmake << 'CMAKEFILE'
-        # Direct setup for zstd targets
-        if(NOT TARGET zstd)
-          add_library(zstd STATIC IMPORTED GLOBAL)
-          set_target_properties(zstd PROPERTIES
-            IMPORTED_LOCATION "${ZSTD_LIBRARY}"
-            INTERFACE_INCLUDE_DIRECTORIES "${ZSTD_INCLUDE_DIR}"
-          )
-        endif()
+        cat > cmake/custom/DirectZstdSetup.cmake << EOF
+# Direct setup for zstd targets
+if(NOT TARGET zstd)
+  add_library(zstd STATIC IMPORTED GLOBAL)
+  set_target_properties(zstd PROPERTIES
+    IMPORTED_LOCATION "${ZSTD_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${ZSTD_INCLUDE_DIR}"
+  )
+endif()
 
-        if(NOT TARGET zstd::libzstd_shared)
-          add_library(zstd::libzstd_shared ALIAS zstd)
-        endif()
+if(NOT TARGET zstd::libzstd_shared)
+  add_library(zstd::libzstd_shared ALIAS zstd)
+endif()
 
-        # Make sure to set these for FindPackage
-        set(ZSTD_INCLUDE_DIRS ${ZSTD_INCLUDE_DIR})
-        set(ZSTD_LIBRARIES ${ZSTD_LIBRARY})
-        set(zstd_FOUND TRUE)
-        CMAKEFILE
+# Make sure to set these for FindPackage
+set(ZSTD_INCLUDE_DIRS ${ZSTD_INCLUDE_DIR})
+set(ZSTD_LIBRARIES ${ZSTD_LIBRARY})
+set(zstd_FOUND TRUE)
+EOF
 
         # 5. Create a simple ZstdConfig.cmake
-        cat > cmake/custom/ZstdConfig.cmake << 'CMAKEFILE'
-        # ZstdConfig.cmake for bpftrace build
-        get_filename_component(CURRENT_CMAKE_DIR "${CMAKE_CURRENT_LIST_FILE}" PATH)
+        cat > cmake/custom/ZstdConfig.cmake << EOF
+# ZstdConfig.cmake for bpftrace build
+get_filename_component(CURRENT_CMAKE_DIR "${CMAKE_CURRENT_LIST_FILE}" PATH)
 
-        # Set up ZSTD variables
-        set(ZSTD_INCLUDE_DIR "${ZSTD_INCLUDE_DIR}")
-        set(ZSTD_LIBRARY "${ZSTD_LIBRARY}")
+# Set up ZSTD variables
+set(ZSTD_INCLUDE_DIR "${ZSTD_INCLUDE_DIR}")
+set(ZSTD_LIBRARY "${ZSTD_LIBRARY}")
 
-        # Include the Zstd targets
-        include("${CURRENT_CMAKE_DIR}/DirectZstdSetup.cmake")
-        CMAKEFILE
+# Include the Zstd targets
+include("${CURRENT_CMAKE_DIR}/DirectZstdSetup.cmake")
+EOF
 
         # 6. Also, create a direct zstd.cmake file
-        cat > cmake/custom/zstd.cmake << 'CMAKEFILE'
-        # Direct zstd setup for projects that use add_subdirectory or include()
-        if(NOT TARGET zstd)
-          add_library(zstd STATIC IMPORTED GLOBAL)
-          set_target_properties(zstd PROPERTIES
-            IMPORTED_LOCATION "${ZSTD_LIBRARY}"
-            INTERFACE_INCLUDE_DIRECTORIES "${ZSTD_INCLUDE_DIR}"
-          )
-        endif()
+        cat > cmake/custom/zstd.cmake << EOF
+# Direct zstd setup for projects that use add_subdirectory or include()
+if(NOT TARGET zstd)
+  add_library(zstd STATIC IMPORTED GLOBAL)
+  set_target_properties(zstd PROPERTIES
+    IMPORTED_LOCATION "${ZSTD_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${ZSTD_INCLUDE_DIR}"
+  )
+endif()
 
-        if(NOT TARGET zstd::libzstd_shared)
-          add_library(zstd::libzstd_shared ALIAS zstd)
-        endif()
-        CMAKEFILE
+if(NOT TARGET zstd::libzstd_shared)
+  add_library(zstd::libzstd_shared ALIAS zstd)
+endif()
+EOF
 
         # 7. Copy these files to multiple locations to ensure they're found
         mkdir -p cmake/modules
