@@ -58,7 +58,7 @@ jobs:
             pkg-config \
             sed \
             libpcap-dev \
-            patch
+            libfindbin-libs-perl
 
         # Install LLVM 16
         RUN wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
@@ -122,6 +122,9 @@ jobs:
         echo "libbcc library:"
         find /usr -name "libbcc*.a" || echo "libbcc*.a not found"
         find /usr -name "libbcc*.so" || echo "libbcc*.so not found"
+        echo "zstd library:"
+        find /usr -name "libzstd*.a" || echo "libzstd*.a not found"
+        find /usr -name "libzstd*.so" || echo "libzstd*.so not found"
         echo "libbpf version:"
         cat /usr/include/bpf/libbpf_version.h || echo "libbpf_version.h not found"
         echo "Architecture:"
@@ -132,54 +135,43 @@ jobs:
         cp -r /bpftrace/* /bpftrace-build/
         cd /bpftrace-build
 
-        # Create patches to handle common issues
-        cat > bpftrace_patch.txt << 'PATCH'
-        --- CMakeLists.txt
-        +++ CMakeLists.txt
-        @@ -89,7 +89,7 @@
-         find_package(LibBpf)
-         
-         if(LIBBPF_FOUND AND LIBBPF_VERSION VERSION_LESS 1.5)
-        -  message(FATAL_ERROR "bpftrace requires libbpf 1.5 or greater")
-        +  message(WARNING "bpftrace prefers libbpf 1.5 or greater, but continuing with what we have")
-         endif()
-         
-         option(HAVE_BFD_DISASM "Use libbfd disassembler instead of LLVM" OFF)
-        PATCH
+        # Directly edit the source files to fix the zstd references and other issues
+        echo "Fixing source files..."
+        
+        # 1. Disable libbpf version check in CMakeLists.txt
+        if grep -q "bpftrace requires libbpf 1.5 or greater" CMakeLists.txt; then
+          sed -i 's/message(FATAL_ERROR "bpftrace requires libbpf 1.5 or greater")/message(WARNING "Bypassing libbpf version check")/g' CMakeLists.txt
+        fi
 
-        # Create a patch for src/CMakeLists.txt
-        cat > src_patch.txt << 'PATCH'
-        --- src/CMakeLists.txt
-        +++ src/CMakeLists.txt
-        @@ -42,7 +42,7 @@
-         add_library(libbpftrace STATIC ${SOURCES})
-         
-         # Used by other programs. We link it statically for now.
-        -target_link_libraries(libbpftrace PRIVATE ${LIBS_TO_LINK} zstd::libzstd_shared)
-        +target_link_libraries(libbpftrace PRIVATE ${LIBS_TO_LINK} zstd)
-         
-         add_executable(bpftrace main.cpp)
-        -target_link_libraries(bpftrace PRIVATE ast libbpftrace zstd::libzstd_shared)
-        +target_link_libraries(bpftrace PRIVATE ast libbpftrace zstd)
-        PATCH
+        # 2. Fix zstd references in src/CMakeLists.txt
+        if grep -q "zstd::libzstd_shared" src/CMakeLists.txt; then
+          sed -i 's/zstd::libzstd_shared/zstd/g' src/CMakeLists.txt
+        fi
 
-        # Create a patch for ast CMakeLists.txt
-        cat > ast_patch.txt << 'PATCH'
-        --- src/ast/CMakeLists.txt
-        +++ src/ast/CMakeLists.txt
-        @@ -10,5 +10,5 @@
-         add_library(ast STATIC ${SOURCES})
-         
-         # Used by libbpftrace and tool unit tests (main_test.cpp)
-        -target_link_libraries(ast PRIVATE ${LIBBPF_LIBRARIES} ${LLVM_LIBS} zstd::libzstd_shared)
-        +target_link_libraries(ast PRIVATE ${LIBBPF_LIBRARIES} ${LLVM_LIBS} zstd)
-         target_include_directories(ast PUBLIC ${CMAKE_SOURCE_DIR}/src)
-        PATCH
+        # 3. Fix zstd references in src/ast/CMakeLists.txt
+        if grep -q "zstd::libzstd_shared" src/ast/CMakeLists.txt; then
+          sed -i 's/zstd::libzstd_shared/zstd/g' src/ast/CMakeLists.txt
+        fi
 
-        # Apply the patches
-        patch -p0 < bpftrace_patch.txt || echo "Failed to apply bpftrace patch"
-        patch -p0 < src_patch.txt || echo "Failed to apply src patch"
-        patch -p0 < ast_patch.txt || echo "Failed to apply ast patch"
+        # 4. Create a custom FindZstd.cmake file
+        mkdir -p cmake/custom
+        cat > cmake/custom/FindZstd.cmake << 'CMAKEFILE'
+        # Find Zstd library
+        find_path(ZSTD_INCLUDE_DIR zstd.h)
+        find_library(ZSTD_LIBRARY NAMES zstd)
+
+        include(FindPackageHandleStandardArgs)
+        find_package_handle_standard_args(zstd DEFAULT_MSG ZSTD_INCLUDE_DIR ZSTD_LIBRARY)
+        
+        if(zstd_FOUND)
+          add_library(zstd STATIC IMPORTED)
+          set_target_properties(zstd PROPERTIES
+            IMPORTED_LOCATION "${ZSTD_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${ZSTD_INCLUDE_DIR}")
+        endif()
+        
+        mark_as_advanced(ZSTD_INCLUDE_DIR ZSTD_LIBRARY)
+        CMAKEFILE
 
         # Create a build directory
         mkdir -p build
@@ -192,7 +184,8 @@ jobs:
           -DBUILD_TESTING=OFF \
           -DSTATIC_LINKING=ON \
           -DENABLE_MAN=OFF \
-          -DENABLE_LIBBLAZESYM=OFF
+          -DZSTD_LIBRARY=/usr/lib/aarch64-linux-gnu/libzstd.a \
+          -DCMAKE_MODULE_PATH=/bpftrace-build/cmake/custom
 
         # Build
         make -j$(nproc) VERBOSE=1 || make VERBOSE=1
