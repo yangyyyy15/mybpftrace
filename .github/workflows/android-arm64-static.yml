@@ -111,7 +111,7 @@ jobs:
         # Build Docker image with platform set to arm64 and load it into Docker
         docker buildx build --platform linux/arm64 --load -t bpftrace-android-arm64 -f Dockerfile.android-arm64 .
 
-        # Create build script with integrated fixes for zstd
+        # Create build script with integrated fixes for zstd and C++ compilation
         cat > build-android-arm64.sh << 'EOF'
         #!/bin/bash
         set -ex
@@ -149,6 +149,15 @@ jobs:
 
         echo "Using zstd library at: ${ZSTD_LIB_PATH}"
         echo "Using zstd include at: ${ZSTD_INCLUDE_PATH}"
+
+        # ======= FIX C++ ISSUES =======
+        echo "Fixing C++ compatibility issues..."
+        
+        # Fix cstring_view.h constexpr error - modify constructor to avoid using std::string_view constructor
+        if [ -f "src/container/cstring_view.h" ]; then
+          echo "Patching cstring_view.h..."
+          sed -i 's/: std::string_view{ str }/: std::string_view{ str.c_str(), str.length() }/' src/container/cstring_view.h
+        fi
 
         # ======= FIX ZSTD ISSUES COMPREHENSIVELY =======
         echo "Fixing zstd issues comprehensively..."
@@ -272,12 +281,16 @@ jobs:
           set(ZSTD_INCLUDE_DIR "'${ZSTD_INCLUDE_PATH}'")\
           include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/custom/zstd.cmake)' CMakeLists.txt
         fi
+        
+        # Add C++17 compatibility fixes to the CMakeLists.txt
+        sed -i 's/set(CMAKE_CXX_STANDARD 20)/set(CMAKE_CXX_STANDARD 17)/' CMakeLists.txt
 
-        # Create build directory and proceed with first configuration approach
+        # Create build directory
         mkdir -p build
         cd build
-        
-        echo "=== Trying first CMake configuration approach ==="
+
+        # Configure with CMake - using C++17 instead of C++20 to avoid compatibility issues
+        echo "=== Trying CMake configuration with C++17 ==="
         LLVM_REQUESTED_VERSION=16 cmake .. \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_VERBOSE_MAKEFILE=ON \
@@ -287,58 +300,13 @@ jobs:
           -DZSTD_LIBRARY=${ZSTD_LIB_PATH} \
           -DZSTD_INCLUDE_DIR=${ZSTD_INCLUDE_PATH} \
           -DCMAKE_MODULE_PATH=/bpftrace-build/cmake/custom:/bpftrace-build/cmake/modules \
-          -DCMAKE_PREFIX_PATH=/bpftrace-build/cmake/custom
+          -DCMAKE_PREFIX_PATH=/bpftrace-build/cmake/custom \
+          -DCMAKE_CXX_STANDARD=17 \
+          -DCMAKE_CXX_FLAGS="-Wno-error=missing-field-initializers"
 
-        # If the configuration succeeds, attempt the build
-        if [ $? -eq 0 ]; then
-          echo "=== CMake configuration successful, attempting build ==="
-          make -j$(nproc) VERBOSE=1 || make VERBOSE=1
-        else
-          echo "=== First approach failed, trying second approach ==="
-          cd ..
-          rm -rf build
-          mkdir -p build
-          cd build
-          
-          # Try simpler CMake configuration
-          LLVM_REQUESTED_VERSION=16 cmake .. \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_TESTING=OFF \
-            -DSTATIC_LINKING=ON \
-            -DENABLE_MAN=OFF \
-            -DZSTD_LIBRARY=${ZSTD_LIB_PATH} \
-            -DZSTD_INCLUDE_DIR=${ZSTD_INCLUDE_PATH}
-          
-          # If the second approach succeeds, attempt the build
-          if [ $? -eq 0 ]; then
-            echo "=== Second approach succeeded, attempting build ==="
-            make -j$(nproc) VERBOSE=1 || make VERBOSE=1
-          else
-            echo "=== Second approach failed, direct editing source files ==="
-            cd ..
-            rm -rf build
-            
-            # Replace all references to zstd::libzstd_shared with the actual library path
-            for cmake_file in $(find . -name "CMakeLists.txt"); do
-              if grep -q "zstd" "$cmake_file"; then
-                echo "Updating zstd references in $cmake_file"
-                sed -i "s|zstd::libzstd_shared|${ZSTD_LIB_PATH}|g" "$cmake_file"
-                sed -i "s|zstd|${ZSTD_LIB_PATH}|g" "$cmake_file"
-              fi
-            done
-            
-            # Final attempt
-            mkdir -p build
-            cd build
-            LLVM_REQUESTED_VERSION=16 cmake .. \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DBUILD_TESTING=OFF \
-              -DSTATIC_LINKING=ON \
-              -DENABLE_MAN=OFF
-            
-            make -j$(nproc) VERBOSE=1 || make VERBOSE=1
-          fi
-        fi
+        # Build the project
+        echo "=== Building bpftrace ==="
+        make -j$(nproc) || make
 
         # Check if the binary was successfully built
         if [ -f "src/bpftrace" ]; then
