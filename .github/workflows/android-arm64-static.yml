@@ -38,6 +38,8 @@ jobs:
             libcereal-dev \
             liblzma-dev \
             libiberty-dev \
+            libzstd-dev \
+            libncurses-dev \
             binutils-aarch64-linux-gnu \
             gcc-aarch64-linux-gnu \
             g++-aarch64-linux-gnu
@@ -73,6 +75,14 @@ jobs:
         RUN cp -r /usr/include/bpf /usr/aarch64-linux-gnu/include/ && \
             ln -sf /usr/lib64/libbpf.a /usr/aarch64-linux-gnu/lib/
 
+        # 创建终端库的软链接
+        RUN ln -sf /usr/lib/x86_64-linux-gnu/libncurses.a /usr/lib/libtinfo.a && \
+            ln -sf /usr/lib/x86_64-linux-gnu/libncurses.a /usr/aarch64-linux-gnu/lib/libtinfo.a
+
+        # 创建zstd库的软链接
+        RUN ln -sf /usr/lib/x86_64-linux-gnu/libzstd.a /usr/lib/libzstd.a && \
+            ln -sf /usr/lib/x86_64-linux-gnu/libzstd.a /usr/aarch64-linux-gnu/lib/libzstd.a
+
         # 创建简单的BCC环境 - 避免软链接覆盖目录
         RUN git clone https://github.com/iovisor/bcc.git && \
             mkdir -p /usr/include/bcc && \
@@ -84,7 +94,13 @@ jobs:
             cp -r /usr/include/bcc/* /usr/aarch64-linux-gnu/include/bcc/ 2>/dev/null || true && \
             touch dummy.c && \
             ar rcs /usr/lib/libbcc.a dummy.c && \
-            ln -sf /usr/lib/libbcc.a /usr/aarch64-linux-gnu/lib/
+            ln -sf /usr/lib/libbcc.a /usr/aarch64-linux-gnu/lib/ && \
+            ar rcs /usr/lib/libbcc_bpf.a dummy.c && \
+            ln -sf /usr/lib/libbcc_bpf.a /usr/aarch64-linux-gnu/lib/ && \
+            echo "void bcc_elf_foreach_sym(void) {}" > dummy_loader.c && \
+            gcc -c dummy_loader.c && \
+            ar rcs /usr/lib/libbcc_loader_static.a dummy_loader.o && \
+            ln -sf /usr/lib/libbcc_loader_static.a /usr/aarch64-linux-gnu/lib/
         
         # 复制必要的库文件到ARM64目录
         RUN cp /usr/lib/x86_64-linux-gnu/libelf.a /usr/aarch64-linux-gnu/lib/ 2>/dev/null || true && \
@@ -103,6 +119,39 @@ jobs:
 
         # 构建Docker镜像
         docker build -t bpftrace-android-arm64 -f Dockerfile.android-arm64 .
+
+        # 创建修改版的src/CMakeLists.txt
+        cat > src_cmakelists.patch << 'EOF'
+        --- src/CMakeLists.txt.orig	2023-01-01 00:00:00.000000000 +0000
+        +++ src/CMakeLists.txt	2023-01-01 00:00:00.000000000 +0000
+        @@ -44,7 +44,7 @@
+         add_library(libbpftrace STATIC ${SOURCES})
+         target_include_directories(libbpftrace PUBLIC ${CMAKE_SOURCE_DIR}/src)
+         target_include_directories(libbpftrace PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
+        -target_link_libraries(libbpftrace ast parser resources arch)
+        +target_link_libraries(libbpftrace ast parser resources arch z lzma ncurses)
+         
+         add_dependencies(libbpftrace parser)
+         set_target_properties(libbpftrace PROPERTIES OUTPUT_NAME bpftrace)
+        @@ -53,7 +53,7 @@
+         add_executable(bpftrace main.cpp)
+         if(STATIC_LINKING)
+           if(STATIC_LIBC)
+        -    target_link_options(bpftrace PRIVATE "-static")
+        +    target_link_options(bpftrace PRIVATE "-static -Wl,--allow-multiple-definition")
+           else()
+             # Using -static-libgcc -static-libstdc++ instead of -static
+             # to avoid the huge size increase from statically linking
+        @@ -64,7 +64,7 @@
+             endif()
+           endif()
+         endif()
+        -target_link_libraries(bpftrace libbpftrace)
+        +target_link_libraries(bpftrace libbpftrace z lzma ncurses)
+         
+         if (BUILD_FUZZ)
+           add_executable(bpftrace_fuzz fuzz_main.cpp)
+        EOF
 
         # 创建构建脚本
         cat > build-android-arm64.sh << 'EOF'
@@ -123,6 +172,12 @@ jobs:
         echo "Zlib库:"
         ls -la /usr/lib/x86_64-linux-gnu/libz* || echo "找不到Zlib库"
         ls -la /usr/aarch64-linux-gnu/lib/libz* || echo "找不到ARM64 Zlib库"
+        echo "Zstd库:"
+        ls -la /usr/lib/x86_64-linux-gnu/libzstd* || echo "找不到Zstd库"
+        ls -la /usr/lib/libzstd* || echo "找不到Zstd软链接"
+        echo "Terminfo库:"
+        ls -la /usr/lib/x86_64-linux-gnu/libncurses* || echo "找不到Terminfo库"
+        ls -la /usr/lib/libtinfo* || echo "找不到Terminfo软链接"
         
         # 创建交叉编译工具链文件
         cat > arm64_toolchain.cmake << 'CMAKEEOF'
@@ -148,9 +203,17 @@ jobs:
         set(LIBLZMA_LIBRARIES /usr/lib/x86_64-linux-gnu/liblzma.a)
         set(LIBLZMA_INCLUDE_DIRS /usr/include)
         
+        set(zstd_LIBRARY /usr/lib/libzstd.a)
+        set(zstd_INCLUDE_DIR /usr/include)
+        
+        set(Terminfo_LIBRARIES /usr/lib/libtinfo.a)
+        set(Terminfo_INCLUDE_DIRS /usr/include)
+        
         # BCC设置
         set(LIBBCC_LIBRARIES /usr/lib/libbcc.a)
         set(LIBBCC_INCLUDE_DIRS /usr/include)
+        set(LIBBCC_BPF_LIBRARIES /usr/lib/libbcc_bpf.a)
+        set(LIBBCC_LOADER_LIBRARY_STATIC /usr/lib/libbcc_loader_static.a)
 
         # LIBBPF设置
         set(LIBBPF_LIBRARIES /usr/lib64/libbpf.a)
@@ -160,8 +223,10 @@ jobs:
         # 备份原始CMakeLists.txt
         cp -f CMakeLists.txt CMakeLists.txt.orig
         
-        # 创建修改版本的FindLibElf.cmake
+        # 创建自定义的CMake模块目录
         mkdir -p cmake_mod
+        
+        # 创建修改版本的FindLibElf.cmake
         cat > cmake_mod/FindLibElf.cmake << 'ELFCMAKE'
         # 直接设置LibElf变量，绕过检查
         set(LIBELF_FOUND TRUE)
@@ -185,6 +250,31 @@ jobs:
         set(LIBZ_LIBRARIES "/usr/lib/x86_64-linux-gnu/libz.a")
         ZCMAKE
         
+        # 创建修改版本的Findztsd.cmake
+        cat > cmake_mod/Findzstd.cmake << 'ZSTDCMAKE'
+        # 直接设置zstd变量
+        set(zstd_FOUND TRUE)
+        set(zstd_INCLUDE_DIR "/usr/include")
+        set(zstd_LIBRARY "/usr/lib/libzstd.a")
+        add_library(zstd::libzstd_shared STATIC IMPORTED)
+        set_target_properties(zstd::libzstd_shared PROPERTIES
+          IMPORTED_LOCATION "/usr/lib/libzstd.a"
+          INTERFACE_INCLUDE_DIRECTORIES "/usr/include")
+        ZSTDCMAKE
+        
+        # 创建修改版本的FindTerminfo.cmake
+        cat > cmake_mod/FindTerminfo.cmake << 'TERMINFOCMAKE'
+        # 直接设置Terminfo变量
+        set(Terminfo_FOUND TRUE)
+        set(Terminfo_INCLUDE_DIRS "/usr/include")
+        set(Terminfo_LIBRARIES "/usr/lib/libtinfo.a")
+        set(Terminfo_LINKABLE TRUE)
+        add_library(Terminfo::terminfo STATIC IMPORTED)
+        set_target_properties(Terminfo::terminfo PROPERTIES
+          IMPORTED_LOCATION "/usr/lib/libtinfo.a"
+          INTERFACE_INCLUDE_DIRECTORIES "/usr/include")
+        TERMINFOCMAKE
+        
         # 修改CMakeLists.txt跳过库检查
         sed -i 's/if(LLVM_VERSION VERSION_LESS "16" OR LLVM_VERSION VERSION_GREATER "20")/if(FALSE)/g' CMakeLists.txt
         sed -i 's/if(NOT LIBBPF_FOUND)/if(FALSE)/g' CMakeLists.txt
@@ -195,6 +285,15 @@ jobs:
         sed -i 's|find_package(LibElf REQUIRED)|include(${CMAKE_SOURCE_DIR}/cmake_mod/FindLibElf.cmake)|g' CMakeLists.txt || true
         sed -i 's|find_package(LibLzma)|include(${CMAKE_SOURCE_DIR}/cmake_mod/FindLibLzma.cmake)|g' CMakeLists.txt || true
         sed -i 's|find_package(LibZ)|include(${CMAKE_SOURCE_DIR}/cmake_mod/FindLibZ.cmake)|g' CMakeLists.txt || true
+        sed -i 's|find_package(zstd)|include(${CMAKE_SOURCE_DIR}/cmake_mod/Findzstd.cmake)|g' CMakeLists.txt || true
+        sed -i 's|find_package(Terminfo)|include(${CMAKE_SOURCE_DIR}/cmake_mod/FindTerminfo.cmake)|g' CMakeLists.txt || true
+        
+        # 修改各种其他检查
+        sed -i 's|set(CMAKE_REQUIRED_LIBRARIES "${LIBELF_LIBRARIES}")|set(CMAKE_REQUIRED_LIBRARIES "${LIBELF_LIBRARIES}" "${LIBLZMA_LIBRARIES}" "${LIBZ_LIBRARIES}")|g' CMakeLists.txt || true
+        
+        # 备份和修补src/CMakeLists.txt
+        cp -f src/CMakeLists.txt src/CMakeLists.txt.orig
+        patch -p0 < src_cmakelists.patch || true
         
         # 创建构建目录
         mkdir -p build-android-arm64
@@ -208,18 +307,26 @@ jobs:
           -DENABLE_MAN=OFF \
           -DUSE_SYSTEM_BPF_BCC=OFF \
           -DENABLE_LIBDW=OFF \
+          -DENABLE_LIBBPF_SIDECG=OFF \
           -DENABLE_SKP_DWARF=OFF \
           -DENABLE_LLVM_JIT=OFF \
           -DLIBBPF_LIBRARIES=/usr/lib64/libbpf.a \
           -DLIBBPF_INCLUDE_DIRS=/usr/include \
           -DLIBBCC_LIBRARIES=/usr/lib/libbcc.a \
           -DLIBBCC_INCLUDE_DIRS=/usr/include \
+          -DLIBBCC_BPF_LIBRARIES=/usr/lib/libbcc_bpf.a \
+          -DLIBBCC_LOADER_LIBRARY_STATIC=/usr/lib/libbcc_loader_static.a \
           -DLIBELF_LIBRARIES=/usr/lib/x86_64-linux-gnu/libelf.a \
           -DLIBELF_INCLUDE_DIRS=/usr/include \
           -DLIBLZMA_LIBRARIES=/usr/lib/x86_64-linux-gnu/liblzma.a \
           -DLIBLZMA_INCLUDE_DIRS=/usr/include \
           -DLIBZ_LIBRARIES=/usr/lib/x86_64-linux-gnu/libz.a \
           -DLIBZ_INCLUDE_DIRS=/usr/include \
+          -Dzstd_LIBRARY=/usr/lib/libzstd.a \
+          -Dzstd_INCLUDE_DIR=/usr/include \
+          -DTerminfo_LIBRARIES=/usr/lib/libtinfo.a \
+          -DTerminfo_INCLUDE_DIRS=/usr/include \
+          -DTerminfo_LINKABLE=TRUE \
           -DHAVE_LIBBCC_PERF_READER_OPEN_PERF_EVENT=OFF \
           -DHAVE_BCC_PROG_LOAD=ON \
           -DHAVE_BCC_CREATE_MAP=ON \
