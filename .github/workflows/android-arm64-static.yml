@@ -324,8 +324,7 @@ jobs:
             -DENABLE_MAN=OFF \
             -DZSTD_INCLUDE_DIR=${ZSTD_INCLUDE_PATH} \
             -DZSTD_LIBRARY=${ZSTD_LIB_PATH} \
-            -DCMAKE_MODULE_PATH=$(pwd)/modules \
-            -DCMAKE_CXX_FLAGS="-include $(pwd)/modules/DirectZstd.cmake"
+            -DCMAKE_MODULE_PATH=$(pwd)/modules
         fi
 
         # If that still doesn't work, try direct source modification approach
