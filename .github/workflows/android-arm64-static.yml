@@ -44,6 +44,7 @@ jobs:
             libfl-dev \
             libcereal-dev \
             python3 \
+            libbpf-dev \
             binutils-aarch64-linux-gnu \
             gcc-aarch64-linux-gnu \
             g++-aarch64-linux-gnu \
@@ -54,7 +55,8 @@ jobs:
         
         # 符号链接共享库
         RUN ln -sf /usr/lib/x86_64-linux-gnu/libz.so /usr/aarch64-linux-gnu/lib/ && \
-            ln -sf /usr/lib/x86_64-linux-gnu/libelf.so* /usr/aarch64-linux-gnu/lib/
+            ln -sf /usr/lib/x86_64-linux-gnu/libelf.so* /usr/aarch64-linux-gnu/lib/ && \
+            ln -sf /usr/lib/x86_64-linux-gnu/libbpf.so* /usr/aarch64-linux-gnu/lib/
         
         # 设置用于构建BCC的目录
         WORKDIR /src
@@ -64,12 +66,15 @@ jobs:
             mkdir -p /usr/include/bcc && \
             mkdir -p /usr/include/bcc/compat && \
             mkdir -p /usr/include/bcc/libbpf && \
-            cp -r /src/bcc/src/cc/api/* /usr/include/bcc/ || true
+            cp -r /src/bcc/src/cc/api/* /usr/include/bcc/ || true && \
+            cp -r /src/bcc/src/cc/bcc_common.h /usr/include/bcc/ || true && \
+            cp -r /src/bcc/src/cc/bcc_version.h /usr/include/bcc/ || true
         
         # 手动创建空的libbcc.a文件
         RUN touch dummy.c && \
             ar rcs /usr/lib/x86_64-linux-gnu/libbcc.a dummy.c && \
-            ln -sf /usr/lib/x86_64-linux-gnu/libbcc.a /usr/aarch64-linux-gnu/lib/libbcc.a
+            ln -sf /usr/lib/x86_64-linux-gnu/libbcc.a /usr/aarch64-linux-gnu/lib/libbcc.a && \
+            ln -sf /usr/include/bcc /usr/aarch64-linux-gnu/include/bcc
         
         WORKDIR /bpftrace
         EOF
@@ -81,7 +86,7 @@ jobs:
         cat > bpftrace_cmake.patch << 'EOF'
         --- CMakeLists.txt.orig
         +++ CMakeLists.txt
-        @@ -80,7 +80,15 @@
+        @@ -80,10 +80,23 @@
          find_package(ZLIB REQUIRED)
          
          # BCC
@@ -97,6 +102,18 @@ jobs:
         +set(HAVE_BCC_CREATE_MAP 1)
         +set(HAVE_BCC_PROG_LOAD 1)
         +set(HAVE_BCC_PROBE_ATTACH 1)
+         
+         # LibBpf
+        -find_package(LibBpf)
+        +# Manually set LibBpf variables
+        +set(LIBBPF_LIBRARIES "/usr/lib/x86_64-linux-gnu/libbpf.a")
+        +set(LIBBPF_INCLUDE_DIRS "/usr/include")
+        +set(LIBBPF_FOUND true)
+        +set(HAVE_LIBBPF_1 1)
+        +set(HAVE_LIBBPF_MAP_BATCH 1)
+         
+         # LibElf
+         find_package(LibElf REQUIRED)
         EOF
         
         # 创建构建脚本
@@ -108,14 +125,24 @@ jobs:
         echo "===== Environment Information ====="
         echo "BCC include directory:"
         ls -la /usr/include/bcc/ || echo "BCC include directory not found"
-        
-        # 备份和修补CMakeLists.txt
-        cp -f CMakeLists.txt CMakeLists.txt.orig || true
-        patch -p0 < bpftrace_cmake.patch || true
+        echo "LIBBPF library:"
+        ls -la /usr/lib/x86_64-linux-gnu/libbpf* || echo "LIBBPF library not found"
         
         # 确保我们有必要的目录
         mkdir -p /usr/include/bcc
         mkdir -p /usr/include/bcc/compat
+        mkdir -p /usr/aarch64-linux-gnu/include/bcc
+        
+        # 创建空的libbpf.a如果不存在
+        if [ ! -f "/usr/lib/x86_64-linux-gnu/libbpf.a" ]; then
+            touch dummy.c
+            ar rcs /usr/lib/x86_64-linux-gnu/libbpf.a dummy.c
+            ln -sf /usr/lib/x86_64-linux-gnu/libbpf.a /usr/aarch64-linux-gnu/lib/libbpf.a
+        fi
+        
+        # 备份和修补CMakeLists.txt
+        cp -f CMakeLists.txt CMakeLists.txt.orig || true
+        patch -p0 < bpftrace_cmake.patch || true
         
         BUILD_DIR=build-android-arm64
         mkdir -p $BUILD_DIR
@@ -144,6 +171,10 @@ jobs:
         # BCC设置
         set(LIBBCC_LIBRARIES /usr/lib/x86_64-linux-gnu/libbcc.a)
         set(LIBBCC_INCLUDE_DIRS /usr/include)
+        
+        # LIBBPF设置
+        set(LIBBPF_LIBRARIES /usr/lib/x86_64-linux-gnu/libbpf.a)
+        set(LIBBPF_INCLUDE_DIRS /usr/include)
         CMAKEEOF
         
         # 配置bpftrace构建
@@ -155,14 +186,19 @@ jobs:
           -DUSE_SYSTEM_BPF_BCC=OFF \
           -DENABLE_SKP_DWARF=OFF \
           -DENABLE_LLVM_JIT=OFF \
+          -DLIBBPF_LIBRARIES=/usr/lib/x86_64-linux-gnu/libbpf.a \
+          -DLIBBPF_INCLUDE_DIRS=/usr/include \
+          -DLIBBCC_LIBRARIES=/usr/lib/x86_64-linux-gnu/libbcc.a \
+          -DLIBBCC_INCLUDE_DIRS=/usr/include \
           -DHAVE_LIBBCC_PERF_READER_OPEN_PERF_EVENT=OFF \
           -DHAVE_BCC_PROG_LOAD=ON \
           -DHAVE_BCC_CREATE_MAP=ON \
           -DHAVE_BCC_KFUNC=ON \
           -DHAVE_BCC_USDT=ON \
+          -DHAVE_LIBBPF_1=ON \
+          -DHAVE_LIBBPF_MAP_BATCH=ON \
           -DBUILD_ASAN=OFF \
-          -DBUILD_NO_DEPRECATED=OFF \
-          -DBUILD_TESTING=OFF
+          -DBUILD_NO_DEPRECATED=OFF
         
         # 构建静态二进制
         make -C "$BUILD_DIR" -j$(nproc) VERBOSE=1 || true
