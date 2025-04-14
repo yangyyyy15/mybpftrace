@@ -21,7 +21,7 @@ jobs:
       run: |
         # Create Dockerfile for Android ARM64 build environment
         cat > Dockerfile.android-arm64 << 'EOF'
-        FROM --platform=linux/arm64 ubuntu:22.04
+        FROM ubuntu:22.04
 
         ENV DEBIAN_FRONTEND=noninteractive
         ENV TZ=Etc/UTC
@@ -101,8 +101,8 @@ jobs:
         WORKDIR /bpftrace
         EOF
 
-        # Build Docker image with platform set to arm64
-        docker buildx build --platform linux/arm64 -t bpftrace-android-arm64 -f Dockerfile.android-arm64 .
+        # Build Docker image with platform set to arm64 and load it into Docker
+        docker buildx build --platform linux/arm64 --load -t bpftrace-android-arm64 -f Dockerfile.android-arm64 .
 
         # Create build script
         cat > build-android-arm64.sh << 'EOF'
