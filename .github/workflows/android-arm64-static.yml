@@ -60,6 +60,12 @@ jobs:
             libpcap-dev \
             libfindbin-libs-perl
 
+        # Make sure zstd is installed and show its location
+        RUN apt-get install -y libzstd-dev \
+            && find /usr -name "libzstd.a" \
+            && find /usr -name "libzstd.so*" \
+            && find /usr -name "zstd.h"
+
         # Install LLVM 16
         RUN wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
             echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-16 main" >> /etc/apt/sources.list.d/llvm.list && \
@@ -125,6 +131,8 @@ jobs:
         echo "zstd library:"
         find /usr -name "libzstd*.a" || echo "libzstd*.a not found"
         find /usr -name "libzstd*.so" || echo "libzstd*.so not found"
+        echo "zstd headers:"
+        find /usr/include -name "zstd*.h" || echo "zstd*.h not found"
         echo "libbpf version:"
         cat /usr/include/bpf/libbpf_version.h || echo "libbpf_version.h not found"
         echo "Architecture:"
@@ -139,21 +147,15 @@ jobs:
         echo "Fixing source files..."
         
         # 1. Disable libbpf version check in CMakeLists.txt
-        if grep -q "bpftrace requires libbpf 1.5 or greater" CMakeLists.txt; then
-          sed -i 's/message(FATAL_ERROR "bpftrace requires libbpf 1.5 or greater")/message(WARNING "Bypassing libbpf version check")/g' CMakeLists.txt
-        fi
+        sed -i 's/message(FATAL_ERROR "bpftrace requires libbpf 1.5 or greater")/message(WARNING "Bypassing libbpf version check")/g' CMakeLists.txt
+        
+        # 2. Fix zstd references in src/CMakeLists.txt - don't rely on grep, just do the replacement
+        sed -i 's/zstd::libzstd_shared/zstd/g' src/CMakeLists.txt
+        
+        # 3. Fix zstd references in src/ast/CMakeLists.txt - don't rely on grep, just do the replacement
+        sed -i 's/zstd::libzstd_shared/zstd/g' src/ast/CMakeLists.txt
 
-        # 2. Fix zstd references in src/CMakeLists.txt
-        if grep -q "zstd::libzstd_shared" src/CMakeLists.txt; then
-          sed -i 's/zstd::libzstd_shared/zstd/g' src/CMakeLists.txt
-        fi
-
-        # 3. Fix zstd references in src/ast/CMakeLists.txt
-        if grep -q "zstd::libzstd_shared" src/ast/CMakeLists.txt; then
-          sed -i 's/zstd::libzstd_shared/zstd/g' src/ast/CMakeLists.txt
-        fi
-
-        # 4. Create a custom FindZstd.cmake file
+        # 4. Create a custom FindZstd.cmake file with an alias target
         mkdir -p cmake/custom
         cat > cmake/custom/FindZstd.cmake << 'CMAKEFILE'
         # Find Zstd library
@@ -168,6 +170,9 @@ jobs:
           set_target_properties(zstd PROPERTIES
             IMPORTED_LOCATION "${ZSTD_LIBRARY}"
             INTERFACE_INCLUDE_DIRECTORIES "${ZSTD_INCLUDE_DIR}")
+            
+          # Add an alias target to match what the code is looking for
+          add_library(zstd::libzstd_shared ALIAS zstd)
         endif()
         
         mark_as_advanced(ZSTD_INCLUDE_DIR ZSTD_LIBRARY)
@@ -177,6 +182,13 @@ jobs:
         mkdir -p build
         cd build
 
+        # Find zstd library path
+        ZSTD_LIB_PATH=$(find /usr -name "libzstd.a" -print -quit)
+        ZSTD_INCLUDE_PATH=$(dirname $(find /usr -name "zstd.h" -print -quit))
+        
+        echo "Using zstd library at: ${ZSTD_LIB_PATH}"
+        echo "Using zstd include at: ${ZSTD_INCLUDE_PATH}"
+
         # Configure with CMake
         LLVM_REQUESTED_VERSION=16 cmake .. \
           -DCMAKE_BUILD_TYPE=Release \
@@ -184,7 +196,8 @@ jobs:
           -DBUILD_TESTING=OFF \
           -DSTATIC_LINKING=ON \
           -DENABLE_MAN=OFF \
-          -DZSTD_LIBRARY=/usr/lib/aarch64-linux-gnu/libzstd.a \
+          -DZSTD_LIBRARY=${ZSTD_LIB_PATH} \
+          -DZSTD_INCLUDE_DIR=${ZSTD_INCLUDE_PATH} \
           -DCMAKE_MODULE_PATH=/bpftrace-build/cmake/custom
 
         # Build
