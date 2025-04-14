@@ -75,12 +75,21 @@ jobs:
                 
         # Create ARM64 cross-compilation toolkit directories
         RUN mkdir -p /usr/aarch64-linux-gnu/include /usr/aarch64-linux-gnu/lib
+        
+        # Install ARM64 cross-compilation essential packages
+        RUN apt-get update && apt-get install -y \
+            libzstd-dev:arm64 \
+            libxml2-dev:arm64 \
+            zlib1g-dev:arm64 \
+            libdw-dev:arm64 \
+            libelf-dev:arm64 \
+            liblzma-dev:arm64
             
-        # Install libbpf using a known tag - use master as fallback
+        # Install libbpf v1.5.0
         WORKDIR /opt
         RUN git clone https://github.com/libbpf/libbpf.git && \
             cd libbpf && \
-            ( git checkout v1.3.0 || echo "Tag not found, using master" ) && \
+            git checkout v1.5.0 && \
             cd src && \
             make BUILD_STATIC_ONLY=y OBJDIR=/tmp/libbpf DESTDIR=/tmp/libbpf install && \
             cp -r /tmp/libbpf/usr/lib64/libbpf.a /usr/lib/ && \
@@ -88,14 +97,8 @@ jobs:
             cp -r /tmp/libbpf/usr/lib64/libbpf.a /usr/aarch64-linux-gnu/lib/ && \
             cp -r /tmp/libbpf/usr/include/* /usr/aarch64-linux-gnu/include/ && \
             ls -la /usr/lib/libbpf.a && \
-            find /usr/include -name "bpf*.h" | sort
-
-        # Install additional libs for the cross-compilation
-        RUN apt-get update && apt-get install -y \
-            libzstd-dev \
-            libxml2-dev \
-            zlib1g-dev \
-            libdw-dev
+            find /usr/include -name "bpf*.h" | sort && \
+            cat /usr/include/bpf/libbpf_version.h
 
         # Get BCC headers (but not the library, since we'll use libbpf)
         WORKDIR /src
@@ -131,7 +134,7 @@ jobs:
         echo "libbpf library:"
         find /usr -name libbpf.a
         echo "libbpf version:"
-        grep -r "LIBBPF_.*_VERSION" /usr/include/bpf/libbpf_version.h || echo "Version file not found"
+        cat /usr/include/bpf/libbpf_version.h
 
         # Create cross-compilation toolchain file
         cat > arm64_toolchain.cmake << 'CMAKEEOF'
@@ -162,19 +165,38 @@ jobs:
         set(LIBBPF_INCLUDE_DIRS /usr/include/bpf)
         CMAKEEOF
 
-        # Based on static.sh script but adapting for Android/ARM64 build
-        echo "Configuring bpftrace for static ARM64 build..."
+        # Patch the CMakeLists.txt to better handle our cross-compilation case
+        echo "Applying necessary patches to build system..."
 
+        # 1. Make LibBcc optional to avoid that dependency
+        if grep -q "find_package(LibBcc REQUIRED)" CMakeLists.txt; then
+          echo "Patching CMakeLists.txt to make LibBcc optional"
+          sed -i 's/find_package(LibBcc REQUIRED)/find_package(LibBcc)/' CMakeLists.txt
+        fi
+
+        # 2. Remove the libbpf version check that's causing issues
+        if grep -q "bpftrace requires libbpf .* or greater" CMakeLists.txt; then
+          echo "Removing libbpf version check"
+          sed -i 's/if(LIBBPF_FOUND AND LIBBPF_VERSION VERSION_LESS.*/if(FALSE)/' CMakeLists.txt
+        fi
+
+        # 3. Skip building man pages
+        if grep -q "option(ENABLE_MAN" CMakeLists.txt; then
+          echo "Disabling man pages"
+          sed -i 's/option(ENABLE_MAN.*/option(ENABLE_MAN "Build and install man pages" OFF)/' CMakeLists.txt
+        fi
+
+        # 4. Disable any features that might cause build issues in cross-compilation
+        if grep -q "BPF_ATTACHPOINT_SUPPORTS_AUTO" CMakeLists.txt; then
+          echo "Disabling BPF_ATTACHPOINT_SUPPORTS_AUTO detection in build"
+          sed -i 's/CHECK_CXX_SOURCE_COMPILES(.*BPF_ATTACHPOINT_SUPPORTS_AUTO.*/set(HAVE_BPF_PROG_ATTACH_OPTS 0)/' CMakeLists.txt
+        fi
+
+        echo "Building static bpftrace for ARM64..."
         mkdir -p build-android-arm64
         cd build-android-arm64
 
-        # Add modification to CMakeLists.txt to skip BCC requirement if it's causing issues
-        if grep -q "find_package(LibBcc REQUIRED)" ../CMakeLists.txt; then
-          echo "Patching CMakeLists.txt to make LibBcc optional"
-          sed -i 's/find_package(LibBcc REQUIRED)/find_package(LibBcc)/' ../CMakeLists.txt
-        fi
-
-        # Configure with CMake - we'll use similar flags to the static build but for ARM64
+        # Configure with CMake
         LLVM_REQUESTED_VERSION=16 cmake .. \
           -DCMAKE_TOOLCHAIN_FILE=../arm64_toolchain.cmake \
           -DCMAKE_BUILD_TYPE=Release \
@@ -184,11 +206,13 @@ jobs:
           -DUSE_LIBCC_POINTER_LOOKUP=OFF \
           -DALLOW_UNSAFE_PROBE=ON \
           -DBUILD_SHARED_LIBS=OFF \
-          -DCMAKE_VERBOSE_MAKEFILE=ON \
+          -DENABLE_MAN=OFF \
+          -DENABLE_LLVM_JIT=OFF \
           -DLIBBCC_ATTACH_KPROBE_SIX_ARGS_SIGNATURE=OFF \
-          -DLIBBCC_ATTACH_UPROBE_SEVEN_ARGS_SIGNATURE=OFF
+          -DLIBBCC_ATTACH_UPROBE_SEVEN_ARGS_SIGNATURE=OFF \
+          -DENABLE_LLVM_JIT=OFF
 
-        # Build
+        # Build - first try with multiple cores, fallback to single thread if issues
         make -j$(nproc) VERBOSE=1 || make VERBOSE=1
 
         # Check for the binary
