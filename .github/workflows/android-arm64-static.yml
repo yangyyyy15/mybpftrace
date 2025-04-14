@@ -203,6 +203,26 @@ jobs:
           echo "cstring_view.h has been completely rewritten"
         fi
 
+        # ======= FIX ATTACHED_PROBE.CPP ISSUE =======
+        echo "Fixing attached_probe.cpp issues..."
+        
+        if [ -f "src/attached_probe.cpp" ]; then
+          echo "Patching attached_probe.cpp..."
+          
+          # 备份原始文件
+          cp src/attached_probe.cpp src/attached_probe.cpp.bak
+          
+          # 修复 bpf_iter_link_info.task 不存在的问题 - 注释掉或修改对应代码
+          sed -i '/linfo\.task\.pid = \*pid;/c\    // linfo.task.pid = *pid; // Commented out due to missing member in bpf_iter_link_info union' src/attached_probe.cpp
+          
+          # 修复不返回值的函数
+          sed -i '/LOG(BUG) << "invalid probe attachtype "/a\      return static_cast<bpf_probe_attach_type>(0); // Default return to fix build error' src/attached_probe.cpp
+          sed -i '/LOG(BUG) << "invalid program type: "/a\      return "unknown"; // Default return to fix build error' src/attached_probe.cpp
+          sed -i '/AttachedProbe::eventname() const/,/^}/ s/^}$/  return ""; // Default return to fix build error\n}/' src/attached_probe.cpp
+          
+          echo "attached_probe.cpp has been patched"
+        fi
+
         # ======= FIX ZSTD ISSUES COMPREHENSIVELY =======
         echo "Fixing zstd issues comprehensively..."
 
