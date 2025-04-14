@@ -11,11 +11,17 @@ jobs:
       with:
         fetch-depth: 0
 
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
     - name: Build Android ARM64 static binary
       run: |
         # Create Dockerfile for Android ARM64 build environment
         cat > Dockerfile.android-arm64 << 'EOF'
-        FROM ubuntu:22.04
+        FROM --platform=linux/arm64 ubuntu:22.04
 
         ENV DEBIAN_FRONTEND=noninteractive
         ENV TZ=Etc/UTC
@@ -44,9 +50,6 @@ jobs:
             libncurses-dev \
             autoconf \
             libtool \
-            binutils-aarch64-linux-gnu \
-            gcc-aarch64-linux-gnu \
-            g++-aarch64-linux-gnu \
             libdwarf-dev \
             libdw-dev \
             binutils-dev \
@@ -72,18 +75,6 @@ jobs:
         # Set LLVM 16 as default
         RUN update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-16 100 && \
             update-alternatives --install /usr/bin/clang clang /usr/bin/clang-16 100
-                
-        # Create ARM64 cross-compilation toolkit directories
-        RUN mkdir -p /usr/aarch64-linux-gnu/include /usr/aarch64-linux-gnu/lib
-        
-        # Install ARM64 cross-compilation essential packages
-        RUN apt-get update && apt-get install -y \
-            libzstd-dev:arm64 \
-            libxml2-dev:arm64 \
-            zlib1g-dev:arm64 \
-            libdw-dev:arm64 \
-            libelf-dev:arm64 \
-            liblzma-dev:arm64
             
         # Install libbpf v1.5.0
         WORKDIR /opt
@@ -94,8 +85,6 @@ jobs:
             make BUILD_STATIC_ONLY=y OBJDIR=/tmp/libbpf DESTDIR=/tmp/libbpf install && \
             cp -r /tmp/libbpf/usr/lib64/libbpf.a /usr/lib/ && \
             cp -r /tmp/libbpf/usr/include/* /usr/include/ && \
-            cp -r /tmp/libbpf/usr/lib64/libbpf.a /usr/aarch64-linux-gnu/lib/ && \
-            cp -r /tmp/libbpf/usr/include/* /usr/aarch64-linux-gnu/include/ && \
             ls -la /usr/lib/libbpf.a && \
             find /usr/include -name "bpf*.h" | sort && \
             cat /usr/include/bpf/libbpf_version.h
@@ -103,21 +92,17 @@ jobs:
         # Get BCC headers (but not the library, since we'll use libbpf)
         WORKDIR /src
         RUN git clone https://github.com/iovisor/bcc.git -b v0.24.0 --depth 1 && \
-            mkdir -p /usr/include/bcc /usr/aarch64-linux-gnu/include/bcc && \
+            mkdir -p /usr/include/bcc && \
             cp -r /src/bcc/src/cc/api/* /usr/include/bcc/ || true && \
             cp -r /src/bcc/src/cc/libbpf.h /usr/include/bcc/ || true && \
             cp -r /src/bcc/src/cc/bcc_common.h /usr/include/bcc/ || true && \
-            cp -r /src/bcc/src/cc/bcc_exception.h /usr/include/bcc/ || true && \
-            cp -r /src/bcc/src/cc/api/* /usr/aarch64-linux-gnu/include/bcc/ || true && \
-            cp -r /src/bcc/src/cc/libbpf.h /usr/aarch64-linux-gnu/include/bcc/ || true && \
-            cp -r /src/bcc/src/cc/bcc_common.h /usr/aarch64-linux-gnu/include/bcc/ || true && \
-            cp -r /src/bcc/src/cc/bcc_exception.h /usr/aarch64-linux-gnu/include/bcc/ || true
+            cp -r /src/bcc/src/cc/bcc_exception.h /usr/include/bcc/ || true
 
         WORKDIR /bpftrace
         EOF
 
-        # Build Docker image
-        docker build -t bpftrace-android-arm64 -f Dockerfile.android-arm64 .
+        # Build Docker image with platform set to arm64
+        docker buildx build --platform linux/arm64 -t bpftrace-android-arm64 -f Dockerfile.android-arm64 .
 
         # Create build script
         cat > build-android-arm64.sh << 'EOF'
@@ -135,37 +120,10 @@ jobs:
         find /usr -name libbpf.a
         echo "libbpf version:"
         cat /usr/include/bpf/libbpf_version.h
+        echo "Architecture:"
+        uname -m
 
-        # Create cross-compilation toolchain file
-        cat > arm64_toolchain.cmake << 'CMAKEEOF'
-        set(CMAKE_SYSTEM_NAME Linux)
-        set(CMAKE_SYSTEM_PROCESSOR aarch64)
-
-        set(CMAKE_C_COMPILER aarch64-linux-gnu-gcc)
-        set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)
-
-        set(CMAKE_FIND_ROOT_PATH /usr/aarch64-linux-gnu)
-        set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-        set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH)
-        set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE BOTH)
-        set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
-
-        # Libraries
-        set(ZLIB_LIBRARY /usr/lib/aarch64-linux-gnu/libz.a)
-        set(ZLIB_INCLUDE_DIR /usr/include)
-
-        set(LIBELF_LIBRARIES /usr/lib/aarch64-linux-gnu/libelf.a)
-        set(LIBELF_INCLUDE_DIRS /usr/include)
-
-        set(LIBLZMA_LIBRARIES /usr/lib/aarch64-linux-gnu/liblzma.a)
-        set(LIBLZMA_INCLUDE_DIRS /usr/include)
-
-        # LIBBPF settings
-        set(LIBBPF_LIBRARIES /usr/aarch64-linux-gnu/lib/libbpf.a)
-        set(LIBBPF_INCLUDE_DIRS /usr/include/bpf)
-        CMAKEEOF
-
-        # Patch the CMakeLists.txt to better handle our cross-compilation case
+        # Patch the CMakeLists.txt to better handle our build
         echo "Applying necessary patches to build system..."
 
         # 1. Make LibBcc optional to avoid that dependency
@@ -186,19 +144,12 @@ jobs:
           sed -i 's/option(ENABLE_MAN.*/option(ENABLE_MAN "Build and install man pages" OFF)/' CMakeLists.txt
         fi
 
-        # 4. Disable any features that might cause build issues in cross-compilation
-        if grep -q "BPF_ATTACHPOINT_SUPPORTS_AUTO" CMakeLists.txt; then
-          echo "Disabling BPF_ATTACHPOINT_SUPPORTS_AUTO detection in build"
-          sed -i 's/CHECK_CXX_SOURCE_COMPILES(.*BPF_ATTACHPOINT_SUPPORTS_AUTO.*/set(HAVE_BPF_PROG_ATTACH_OPTS 0)/' CMakeLists.txt
-        fi
-
-        echo "Building static bpftrace for ARM64..."
-        mkdir -p build-android-arm64
-        cd build-android-arm64
+        echo "Building static bpftrace..."
+        mkdir -p build-android
+        cd build-android
 
         # Configure with CMake
         LLVM_REQUESTED_VERSION=16 cmake .. \
-          -DCMAKE_TOOLCHAIN_FILE=../arm64_toolchain.cmake \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_VERBOSE_MAKEFILE=ON \
           -DBUILD_TESTING=OFF \
@@ -209,8 +160,7 @@ jobs:
           -DENABLE_MAN=OFF \
           -DENABLE_LLVM_JIT=OFF \
           -DLIBBCC_ATTACH_KPROBE_SIX_ARGS_SIGNATURE=OFF \
-          -DLIBBCC_ATTACH_UPROBE_SEVEN_ARGS_SIGNATURE=OFF \
-          -DENABLE_LLVM_JIT=OFF
+          -DLIBBCC_ATTACH_UPROBE_SEVEN_ARGS_SIGNATURE=OFF
 
         # Build - first try with multiple cores, fallback to single thread if issues
         make -j$(nproc) VERBOSE=1 || make VERBOSE=1
@@ -242,8 +192,8 @@ jobs:
 
         chmod +x build-android-arm64.sh
 
-        # Run cross-compilation in Docker
-        docker run --rm -v $(pwd):/bpftrace -w /bpftrace bpftrace-android-arm64 ./build-android-arm64.sh || true
+        # Run build in Docker with platform set to arm64
+        docker run --platform linux/arm64 --rm -v $(pwd):/bpftrace -w /bpftrace bpftrace-android-arm64 ./build-android-arm64.sh || true
 
         # Check if the tar.gz file was created
         if [ -f "bpftrace-android-arm64-static.tar.gz" ]; then
