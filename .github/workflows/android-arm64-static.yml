@@ -76,13 +76,13 @@ jobs:
         # Create ARM64 cross-compilation toolkit directories
         RUN mkdir -p /usr/aarch64-linux-gnu/include /usr/aarch64-linux-gnu/lib
             
-        # Download and install libbpf 1.8.2 (newer version)
+        # Download and install libbpf using git instead of tarball
         WORKDIR /opt
         
-        # Download and install libbpf 1.8.2 instead of 1.2.0
-        RUN curl -L -o libbpf.tar.gz https://github.com/libbpf/libbpf/archive/refs/tags/v1.8.2.tar.gz && \
-            tar xf libbpf.tar.gz && \
-            cd libbpf-* && \
+        # Clone libbpf directly from git
+        RUN git clone https://github.com/libbpf/libbpf.git && \
+            cd libbpf && \
+            git checkout v1.8.0 && \
             cd src && \
             make BUILD_STATIC_ONLY=y OBJDIR=/tmp/libbpf DESTDIR=/tmp/libbpf install && \
             cp -r /tmp/libbpf/usr/lib64/libbpf.a /usr/lib/ && \
@@ -134,148 +134,8 @@ jobs:
         ls -la /usr/include/bpf/
         echo "libbpf library:"
         find /usr -name libbpf.a
+        echo "libbpf version:"
+        grep -r "LIBBPF_.*_VERSION" /usr/include/bpf/libbpf_version.h || echo "Version file not found"
 
         # Create cross-compilation toolchain file
-        cat > arm64_toolchain.cmake << 'CMAKEEOF'
-        set(CMAKE_SYSTEM_NAME Linux)
-        set(CMAKE_SYSTEM_PROCESSOR aarch64)
-
-        set(CMAKE_C_COMPILER aarch64-linux-gnu-gcc)
-        set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)
-
-        set(CMAKE_FIND_ROOT_PATH /usr/aarch64-linux-gnu)
-        set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-        set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH)
-        set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE BOTH)
-        set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
-
-        # Libraries
-        set(ZLIB_LIBRARY /usr/lib/x86_64-linux-gnu/libz.a)
-        set(ZLIB_INCLUDE_DIR /usr/include)
-
-        set(LIBELF_LIBRARIES /usr/lib/x86_64-linux-gnu/libelf.a)
-        set(LIBELF_INCLUDE_DIRS /usr/include)
-
-        set(LIBLZMA_LIBRARIES /usr/lib/x86_64-linux-gnu/liblzma.a)
-        set(LIBLZMA_INCLUDE_DIRS /usr/include)
-
-        # LIBBPF settings
-        set(LIBBPF_LIBRARIES /usr/aarch64-linux-gnu/lib/libbpf.a)
-        set(LIBBPF_INCLUDE_DIRS /usr/include)
-        CMAKEEOF
-        
-        # Modify CMakeLists.txt directly instead of using a patch
-        # This is more reliable since it doesn't depend on exact file content matching
-        echo "Modifying CMakeLists.txt to enable libbpf-only mode..."
-        
-        # 1. Add the USE_LIBBPF_ONLY option
-        sed -i '/option(ENABLE_MAN/i option(USE_LIBBPF_ONLY "Build with libbpf backend only, no BCC dependency" OFF)\n' CMakeLists.txt
-        
-        # 2. Find the line with find_package(LibBcc REQUIRED) and replace it with conditional code
-        sed -i 's/find_package(LibBcc REQUIRED)/if(NOT USE_LIBBPF_ONLY)\n  find_package(LibBcc REQUIRED)\nendif()/' CMakeLists.txt
-        
-        # 3. Skip libbpf version check if needed
-        sed -i 's/bpftrace requires libbpf .* or greater/bpftrace requires libbpf 1.5 or greater - bypassing check/' CMakeLists.txt
-        
-        # 4. Check if the changes were successfully applied
-        grep "USE_LIBBPF_ONLY" CMakeLists.txt || echo "Failed to add USE_LIBBPF_ONLY option!"
-        grep -A3 "if(NOT USE_LIBBPF_ONLY)" CMakeLists.txt || echo "Failed to modify LibBcc dependency!"
-
-        # Create build directory
-        mkdir -p build-android-arm64
-        cd build-android-arm64
-
-        # Get available build options
-        grep -r "option(" ../ || true
-
-        # Configure bpftrace build - using ONLY LIBBPF backend, no BCC
-        LLVM_REQUESTED_VERSION=16 cmake .. \
-          -DCMAKE_TOOLCHAIN_FILE=../arm64_toolchain.cmake \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_CXX_STANDARD=17 \
-          -DBUILD_TESTING=OFF \
-          -DENABLE_MAN=OFF \
-          -DENABLE_LIBDW=OFF \
-          -DENABLE_LLVM_JIT=OFF \
-          -DBUILD_SHARED_LIBS=OFF \
-          -DUSE_LIBBPF_ONLY=ON \
-          -DLIBBCC_ATTACH_KPROBE_SIX_ARGS_SIGNATURE=OFF \
-          -DLIBBCC_ATTACH_UPROBE_SEVEN_ARGS_SIGNATURE=OFF \
-          -DENABLE_SKB_OUTPUT=OFF \
-          -DUSE_LIBCC_POINTER_LOOKUP=OFF \
-          -DUSE_LIBBFD=OFF \
-          -DALLOW_UNSAFE_PROBE=ON \
-          -DALLOW_UNNECESSARY_LIBBPF=ON \
-          -DENABLE_BPF_MSGTYPES=OFF \
-          -DCMAKE_VERBOSE_MAKEFILE=ON
-          
-        # Build
-        make -j$(nproc) VERBOSE=1 || make VERBOSE=1
-
-        # Check if build succeeded
-        if [ -f "src/bpftrace" ]; then
-          echo "Build successful!"
-          file "src/bpftrace"
-          
-          # Create release package
-          mkdir -p release/android-arm64
-          cp "src/bpftrace" release/android-arm64/
-          if [ -d "../tools" ]; then
-            cp -r ../tools release/android-arm64/
-            chmod +x release/android-arm64/tools/*.bt 2>/dev/null || true
-          fi
-          tar -czf /bpftrace/bpftrace-android-arm64-static.tar.gz -C release android-arm64
-          echo "Package created: bpftrace-android-arm64-static.tar.gz"
-        else
-          echo "Build failed - bpftrace binary not found!"
-          
-          # Display CMake logs for debugging
-          echo "==== CMake Error Log ===="
-          cat CMakeFiles/CMakeError.log || true
-          echo "==== CMake Output Log ===="
-          cat CMakeFiles/CMakeOutput.log || true
-          
-          # Additional debug information
-          echo "===== Directory Structure ====="
-          find . -type f -name "*.a" | sort
-          echo "===== Compilation Error Messages ====="
-          find . -name "*.log" | xargs cat || true
-          
-          exit 1
-        fi
-        EOF
-
-        chmod +x build-android-arm64.sh
-
-        # Run cross-compilation in Docker
-        docker run --rm -v $(pwd):/bpftrace -w /bpftrace bpftrace-android-arm64 ./build-android-arm64.sh || true
-
-        # Check if the tar.gz file was created
-        if [ -f "bpftrace-android-arm64-static.tar.gz" ]; then
-          echo "Build package created successfully."
-        else
-          echo "Build failed - package not created."
-          exit 1
-        fi
-
-    - name: Upload Android ARM64 static binary artifacts
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: bpftrace-android-arm64-build-logs
-        path: |
-          build*
-          bpftrace-android-arm64-static.tar.gz
-          
-    - name: Create Release
-      if: success()
-      uses: softprops/action-gh-release@v1
-      with:
-        name: Android ARM64 Static Build
-        tag_name: android-arm64-static-${{ github.run_number }}
-        files: bpftrace-android-arm64-static.tar.gz
-        draft: false
-        prerelease: false
-        generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        cat > arm64_tool
