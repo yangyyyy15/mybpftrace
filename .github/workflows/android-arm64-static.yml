@@ -13,14 +13,14 @@ jobs:
 
     - name: Build Android ARM64 static binary
       run: |
-        # 创建Dockerfile - 使用新的简化方法直接构建bpftrace
+        # Create Dockerfile for Android ARM64 build environment
         cat > Dockerfile.android-arm64 << 'EOF'
         FROM ubuntu:22.04
 
         ENV DEBIAN_FRONTEND=noninteractive
         ENV TZ=Etc/UTC
 
-        # 安装基本依赖
+        # Install basic dependencies
         RUN apt-get update && apt-get install -y \
             build-essential \
             cmake \
@@ -51,9 +51,10 @@ jobs:
             libdw-dev \
             binutils-dev \
             libxml2-dev \
-            pkg-config
+            pkg-config \
+            patch
 
-        # 安装LLVM 16
+        # Install LLVM 16
         RUN wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
             echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-16 main" >> /etc/apt/sources.list.d/llvm.list && \
             apt-get update && \
@@ -64,21 +65,21 @@ jobs:
                 libclang-16-dev \
                 libllvm16 \
                 libz3-dev && \
-            # 检查安装
+            # Check installation
             ls -la /usr/bin/llvm-config-16 && \
             /usr/bin/llvm-config-16 --version
 
-        # 设置LLVM 16为默认版本
+        # Set LLVM 16 as default
         RUN update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-16 100 && \
             update-alternatives --install /usr/bin/clang clang /usr/bin/clang-16 100
-            
-        # 创建ARM64交叉编译工具链目录
+                
+        # Create ARM64 cross-compilation toolkit directories
         RUN mkdir -p /usr/aarch64-linux-gnu/include /usr/aarch64-linux-gnu/lib
-        
-        # 从预编译的二进制文件下载BPF和BCC
+            
+        # Download and install pre-compiled libbpf
         WORKDIR /opt
         
-        # 下载并安装预编译的libbpf
+        # Download and install libbpf
         RUN curl -L -o libbpf.tar.gz https://github.com/libbpf/libbpf/archive/refs/tags/v1.2.0.tar.gz && \
             tar xf libbpf.tar.gz && \
             cd libbpf-* && \
@@ -88,16 +89,13 @@ jobs:
             cp -r /tmp/libbpf/usr/include/* /usr/include/ && \
             cp -r /tmp/libbpf/usr/lib64/libbpf.a /usr/aarch64-linux-gnu/lib/ && \
             cp -r /tmp/libbpf/usr/include/* /usr/aarch64-linux-gnu/include/ && \
-            # 验证安装
             ls -la /usr/lib/libbpf.a && \
-            find /usr/include -name "bpf*.h" | sort && \
-            # 安装pkg-config (之前有警告)
-            apt-get install -y pkg-config
-            
-        # 创建静态构建目录
+            find /usr/include -name "bpf*.h" | sort
+
+        # Create static build directory
         WORKDIR /src
 
-        # 克隆bcc但只安装头文件，不构建库
+        # Clone bcc just for the headers (we don't build the library)
         RUN git clone https://github.com/iovisor/bcc.git -b v0.24.0 && \
             mkdir -p /usr/include/bcc /usr/aarch64-linux-gnu/include/bcc && \
             cp -r /src/bcc/src/cc/api/* /usr/include/bcc/ || true && \
@@ -107,34 +105,30 @@ jobs:
             cp -r /src/bcc/src/cc/api/* /usr/aarch64-linux-gnu/include/bcc/ || true && \
             cp -r /src/bcc/src/cc/libbpf.h /usr/aarch64-linux-gnu/include/bcc/ || true && \
             cp -r /src/bcc/src/cc/bcc_common.h /usr/aarch64-linux-gnu/include/bcc/ || true && \
-            cp -r /src/bcc/src/cc/bcc_exception.h /usr/aarch64-linux-gnu/include/bcc/ || true && \
-            # 列出实际存在的头文件进行检查
-            find /src/bcc/src/cc -name "*.h" | grep -v "/build/" || true
-
-        # 在这个方法中，我们只使用bpftrace的libbpf后端，不需要bcc的完整构建
+            cp -r /src/bcc/src/cc/bcc_exception.h /usr/aarch64-linux-gnu/include/bcc/ || true
 
         WORKDIR /bpftrace
         EOF
 
-        # 构建Docker镜像
+        # Build Docker image
         docker build -t bpftrace-android-arm64 -f Dockerfile.android-arm64 .
 
-        # 创建构建脚本
+        # Create build script
         cat > build-android-arm64.sh << 'EOF'
         #!/bin/bash
         set -ex
 
-        # 显示环境信息
-        echo "===== 环境信息 ====="
-        echo "LLVM版本:"
+        # Display environment information
+        echo "===== Environment Information ====="
+        echo "LLVM version:"
         llvm-config --version
-        echo "包含头文件目录:"
+        echo "Include header directories:"
         ls -la /usr/include/bcc/
         ls -la /usr/include/bpf/
-        echo "libbpf库:"
+        echo "libbpf library:"
         find /usr -name "libbpf.a"
 
-        # 创建交叉编译工具链文件
+        # Create cross-compilation toolchain file
         cat > arm64_toolchain.cmake << 'CMAKEEOF'
         set(CMAKE_SYSTEM_NAME Linux)
         set(CMAKE_SYSTEM_PROCESSOR aarch64)
@@ -148,34 +142,52 @@ jobs:
         set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE BOTH)
         set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
 
-        # 库文件
+        # Libraries
         set(ZLIB_LIBRARY /usr/lib/x86_64-linux-gnu/libz.a)
         set(ZLIB_INCLUDE_DIR /usr/include)
-        
+
         set(LIBELF_LIBRARIES /usr/lib/x86_64-linux-gnu/libelf.a)
         set(LIBELF_INCLUDE_DIRS /usr/include)
-        
+
         set(LIBLZMA_LIBRARIES /usr/lib/x86_64-linux-gnu/liblzma.a)
         set(LIBLZMA_INCLUDE_DIRS /usr/include)
-        
-        # LIBBPF设置
-        set(LIBBPF_LIBRARIES /usr/lib/libbpf.a)
+
+        # LIBBPF settings
+        set(LIBBPF_LIBRARIES /usr/aarch64-linux-gnu/lib/libbpf.a)
         set(LIBBPF_INCLUDE_DIRS /usr/include)
-        
-        # 禁用BCC
-        set(NO_LIBBCC ON)
-        set(LIBBCC_ATTACH_KPROBE_SIX_ARGS_SIGNATURE OFF)
-        set(LIBBCC_ATTACH_UPROBE_SEVEN_ARGS_SIGNATURE OFF)
         CMAKEEOF
-        
-        # 创建构建目录
+
+        # Patch CMakeLists.txt to skip BCC library check when using libbpf only
+        cat > cmake_patch.txt << 'PATCH'
+        --- a/CMakeLists.txt
+        +++ b/CMakeLists.txt
+        @@ -80,7 +80,12 @@ include(CTest)
+         find_package(LibElf REQUIRED)
+         find_package(ZLIB REQUIRED)
+         
+        -find_package(LibBcc REQUIRED)
+        +# Option to build with libbpf backend only (no BCC)
+        +option(USE_LIBBPF_ONLY "Build with libbpf backend only, no BCC dependency" OFF)
+        +if(NOT USE_LIBBPF_ONLY)
+        +  find_package(LibBcc REQUIRED)
+        +endif()
+        +
+         find_package(LibBpf)
+         
+         option(HAVE_BFD_DISASM "Use libbfd disassembler instead of LLVM" OFF)
+        PATCH
+
+        # Apply the patch
+        patch -p1 < cmake_patch.txt
+
+        # Create build directory
         mkdir -p build-android-arm64
         cd build-android-arm64
-        
-        # 查看源代码中可用的选项
+
+        # Get available build options
         grep -r "option(" ../ || true
-        
-        # 配置bpftrace构建 - 完全不依赖BCC，只使用LIBBPF后端
+
+        # Configure bpftrace build - using ONLY LIBBPF backend, no BCC
         LLVM_REQUESTED_VERSION=16 cmake .. \
           -DCMAKE_TOOLCHAIN_FILE=../arm64_toolchain.cmake \
           -DCMAKE_BUILD_TYPE=Release \
@@ -185,47 +197,47 @@ jobs:
           -DENABLE_LIBDW=OFF \
           -DENABLE_LLVM_JIT=OFF \
           -DBUILD_SHARED_LIBS=OFF \
-          -DHAVE_BCC_PROG_LOAD=OFF \
-          -DHAVE_BCC_CREATE_MAP=OFF \
-          -DHAVE_BCC_WORKER=OFF \
+          -DUSE_LIBBPF_ONLY=ON \
           -DLIBBCC_ATTACH_KPROBE_SIX_ARGS_SIGNATURE=OFF \
           -DLIBBCC_ATTACH_UPROBE_SEVEN_ARGS_SIGNATURE=OFF \
           -DENABLE_SKB_OUTPUT=OFF \
-          -DBUILD_TESTING=OFF \
           -DUSE_LIBCC_POINTER_LOOKUP=OFF \
           -DUSE_LIBBFD=OFF \
           -DALLOW_UNSAFE_PROBE=ON \
           -DALLOW_UNNECESSARY_LIBBPF=ON \
           -DENABLE_BPF_MSGTYPES=OFF
-          
-        # 构建
-        make -j$(nproc) VERBOSE=1 || true
-        
-        # 检查是否有bpftrace可执行文件
+
+        # Build
+        make -j$(nproc) VERBOSE=1
+
+        # Check if build succeeded
         if [ -f "src/bpftrace" ]; then
-          echo "构建成功!"
+          echo "Build successful!"
           file "src/bpftrace"
           
-          # 创建发布包
+          # Create release package
           mkdir -p release/android-arm64
           cp "src/bpftrace" release/android-arm64/
-          cp -r /bpftrace/tools release/android-arm64/ || true
-          chmod +x release/android-arm64/tools/*.bt 2>/dev/null || true
+          if [ -d "../tools" ]; then
+            cp -r ../tools release/android-arm64/
+            chmod +x release/android-arm64/tools/*.bt 2>/dev/null || true
+          fi
           tar -czf /bpftrace/bpftrace-android-arm64-static.tar.gz -C release android-arm64
+          echo "Package created: bpftrace-android-arm64-static.tar.gz"
         else
-          echo "构建失败 - 找不到bpftrace二进制文件!"
+          echo "Build failed - bpftrace binary not found!"
           
-          # 显示CMake日志以帮助调试
-          echo "==== CMake错误日志 ===="
+          # Display CMake logs for debugging
+          echo "==== CMake Error Log ===="
           cat CMakeFiles/CMakeError.log || true
-          echo "==== CMake输出日志 ===="
+          echo "==== CMake Output Log ===="
           cat CMakeFiles/CMakeOutput.log || true
           
-          # 额外调试信息
-          echo "===== 目录结构 ====="
+          # Additional debug information
+          echo "===== Directory Structure ====="
           find . -type f -name "*.a" | sort
-          echo "===== 编译错误信息 ====="
-          find . -name "*.log" | xargs cat
+          echo "===== Compilation Error Messages ====="
+          find . -name "*.log" | xargs cat || true
           
           exit 1
         fi
@@ -233,18 +245,18 @@ jobs:
 
         chmod +x build-android-arm64.sh
 
-        # 在Docker中运行交叉编译
+        # Run cross-compilation in Docker
         docker run --rm -v $(pwd):/bpftrace -w /bpftrace bpftrace-android-arm64 ./build-android-arm64.sh || true
 
-        # 检查是否生成了tar.gz文件
+        # Check if the tar.gz file was created
         if [ -f "bpftrace-android-arm64-static.tar.gz" ]; then
-          echo "构建包创建成功。"
+          echo "Build package created successfully."
         else
-          echo "构建失败 - 未创建包。"
+          echo "Build failed - package not created."
           exit 1
         fi
 
-    - name: Upload Android ARM64 static binary
+    - name: Upload Android ARM64 static binary artifacts
       if: always()
       uses: actions/upload-artifact@v4
       with:
