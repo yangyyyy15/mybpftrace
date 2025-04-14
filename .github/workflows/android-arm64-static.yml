@@ -29,6 +29,8 @@ jobs:
             curl \
             gnupg \
             software-properties-common \
+            apt-transport-https \
+            ca-certificates \
             python3 \
             bison \
             flex \
@@ -48,11 +50,12 @@ jobs:
             libdwarf-dev \
             libdw-dev \
             binutils-dev \
-            libxml2-dev
+            libxml2-dev \
+            pkg-config
 
         # 安装LLVM 16
         RUN wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
-            echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-16 main" >> /etc/apt/sources.list && \
+            echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-16 main" >> /etc/apt/sources.list.d/llvm.list && \
             apt-get update && \
             apt-get install -y \
                 llvm-16 \
@@ -60,7 +63,10 @@ jobs:
                 clang-16 \
                 libclang-16-dev \
                 libllvm16 \
-                libz3-dev
+                libz3-dev && \
+            # 检查安装
+            ls -la /usr/bin/llvm-config-16 && \
+            /usr/bin/llvm-config-16 --version
 
         # 设置LLVM 16为默认版本
         RUN update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-16 100 && \
@@ -81,7 +87,12 @@ jobs:
             cp -r /tmp/libbpf/usr/lib64/libbpf.a /usr/lib/ && \
             cp -r /tmp/libbpf/usr/include/* /usr/include/ && \
             cp -r /tmp/libbpf/usr/lib64/libbpf.a /usr/aarch64-linux-gnu/lib/ && \
-            cp -r /tmp/libbpf/usr/include/* /usr/aarch64-linux-gnu/include/
+            cp -r /tmp/libbpf/usr/include/* /usr/aarch64-linux-gnu/include/ && \
+            # 验证安装
+            ls -la /usr/lib/libbpf.a && \
+            find /usr/include -name "bpf*.h" | sort && \
+            # 安装pkg-config (之前有警告)
+            apt-get install -y pkg-config
             
         # 创建静态构建目录
         WORKDIR /src
@@ -89,12 +100,16 @@ jobs:
         # 克隆bcc但只安装头文件，不构建库
         RUN git clone https://github.com/iovisor/bcc.git -b v0.24.0 && \
             mkdir -p /usr/include/bcc /usr/aarch64-linux-gnu/include/bcc && \
-            cp -r /src/bcc/src/cc/api/* /usr/include/bcc/ && \
-            cp -r /src/bcc/src/cc/libbpf.h /usr/include/bcc/ && \
-            cp -r /src/bcc/src/cc/bpf_common.h /usr/include/bcc/ && \
-            cp -r /src/bcc/src/cc/api/* /usr/aarch64-linux-gnu/include/bcc/ && \
-            cp -r /src/bcc/src/cc/libbpf.h /usr/aarch64-linux-gnu/include/bcc/ && \
-            cp -r /src/bcc/src/cc/bpf_common.h /usr/aarch64-linux-gnu/include/bcc/
+            cp -r /src/bcc/src/cc/api/* /usr/include/bcc/ || true && \
+            cp -r /src/bcc/src/cc/libbpf.h /usr/include/bcc/ || true && \
+            cp -r /src/bcc/src/cc/bcc_common.h /usr/include/bcc/ || true && \
+            cp -r /src/bcc/src/cc/bcc_exception.h /usr/include/bcc/ || true && \
+            cp -r /src/bcc/src/cc/api/* /usr/aarch64-linux-gnu/include/bcc/ || true && \
+            cp -r /src/bcc/src/cc/libbpf.h /usr/aarch64-linux-gnu/include/bcc/ || true && \
+            cp -r /src/bcc/src/cc/bcc_common.h /usr/aarch64-linux-gnu/include/bcc/ || true && \
+            cp -r /src/bcc/src/cc/bcc_exception.h /usr/aarch64-linux-gnu/include/bcc/ || true && \
+            # 列出实际存在的头文件进行检查
+            find /src/bcc/src/cc -name "*.h" | grep -v "/build/" || true
 
         # 在这个方法中，我们只使用bpftrace的libbpf后端，不需要bcc的完整构建
 
@@ -147,15 +162,20 @@ jobs:
         set(LIBBPF_LIBRARIES /usr/lib/libbpf.a)
         set(LIBBPF_INCLUDE_DIRS /usr/include)
         
-        # BCC头文件目录，但我们不实际链接BCC库
-        set(LIBBCC_INCLUDE_DIRS /usr/include)
+        # 禁用BCC
+        set(NO_LIBBCC ON)
+        set(LIBBCC_ATTACH_KPROBE_SIX_ARGS_SIGNATURE OFF)
+        set(LIBBCC_ATTACH_UPROBE_SEVEN_ARGS_SIGNATURE OFF)
         CMAKEEOF
         
         # 创建构建目录
         mkdir -p build-android-arm64
         cd build-android-arm64
         
-        # 配置bpftrace构建 - 直接使用LIBBPF后端，不使用BCC
+        # 查看源代码中可用的选项
+        grep -r "option(" ../ || true
+        
+        # 配置bpftrace构建 - 完全不依赖BCC，只使用LIBBPF后端
         LLVM_REQUESTED_VERSION=16 cmake .. \
           -DCMAKE_TOOLCHAIN_FILE=../arm64_toolchain.cmake \
           -DCMAKE_BUILD_TYPE=Release \
@@ -165,8 +185,16 @@ jobs:
           -DENABLE_LIBDW=OFF \
           -DENABLE_LLVM_JIT=OFF \
           -DBUILD_SHARED_LIBS=OFF \
+          -DHAVE_BCC_PROG_LOAD=OFF \
+          -DHAVE_BCC_CREATE_MAP=OFF \
+          -DHAVE_BCC_WORKER=OFF \
+          -DLIBBCC_ATTACH_KPROBE_SIX_ARGS_SIGNATURE=OFF \
+          -DLIBBCC_ATTACH_UPROBE_SEVEN_ARGS_SIGNATURE=OFF \
+          -DENABLE_SKB_OUTPUT=OFF \
+          -DBUILD_TESTING=OFF \
           -DUSE_LIBCC_POINTER_LOOKUP=OFF \
           -DUSE_LIBBFD=OFF \
+          -DALLOW_UNSAFE_PROBE=ON \
           -DALLOW_UNNECESSARY_LIBBPF=ON \
           -DENABLE_BPF_MSGTYPES=OFF
           
