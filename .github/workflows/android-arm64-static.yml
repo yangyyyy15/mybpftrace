@@ -13,7 +13,7 @@ jobs:
 
     - name: Build Android ARM64 static binary
       run: |
-        # 创建Dockerfile - 基于您提供的BCC的Dockerfile
+        # 创建Dockerfile - 使用新的简化方法直接构建bpftrace
         cat > Dockerfile.android-arm64 << 'EOF'
         FROM ubuntu:22.04
 
@@ -65,62 +65,38 @@ jobs:
         # 设置LLVM 16为默认版本
         RUN update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-16 100 && \
             update-alternatives --install /usr/bin/clang clang /usr/bin/clang-16 100
-
-        # 创建ARM64的库目录
-        RUN mkdir -p /usr/aarch64-linux-gnu/lib /usr/aarch64-linux-gnu/include
-
-        # 从源码编译libbpf (指定版本并使用静态构建)
+            
+        # 创建ARM64交叉编译工具链目录
+        RUN mkdir -p /usr/aarch64-linux-gnu/include /usr/aarch64-linux-gnu/lib
+        
+        # 从预编译的二进制文件下载BPF和BCC
+        WORKDIR /opt
+        
+        # 下载并安装预编译的libbpf
+        RUN curl -L -o libbpf.tar.gz https://github.com/libbpf/libbpf/archive/refs/tags/v1.2.0.tar.gz && \
+            tar xf libbpf.tar.gz && \
+            cd libbpf-* && \
+            cd src && \
+            make BUILD_STATIC_ONLY=y OBJDIR=/tmp/libbpf DESTDIR=/tmp/libbpf install && \
+            cp -r /tmp/libbpf/usr/lib64/libbpf.a /usr/lib/ && \
+            cp -r /tmp/libbpf/usr/include/* /usr/include/ && \
+            cp -r /tmp/libbpf/usr/lib64/libbpf.a /usr/aarch64-linux-gnu/lib/ && \
+            cp -r /tmp/libbpf/usr/include/* /usr/aarch64-linux-gnu/include/
+            
+        # 创建静态构建目录
         WORKDIR /src
-        RUN git clone --recursive https://github.com/libbpf/libbpf.git -b v1.2.0 && \
-            cd libbpf/src && \
-            make BUILD_STATIC_ONLY=y && \
-            DESTDIR=/ make install prefix=/usr && \
-            DESTDIR=/ make install_uapi_headers prefix=/usr
 
-        # 编译BCC (使用多步骤方法以确保成功)
-        WORKDIR /src
+        # 克隆bcc但只安装头文件，不构建库
         RUN git clone https://github.com/iovisor/bcc.git -b v0.24.0 && \
-            cd bcc && \
-            mkdir build && \
-            cd build && \
-            cmake -DCMAKE_INSTALL_PREFIX=/usr \
-                  -DENABLE_EXAMPLES=OFF \
-                  -DENABLE_MAN=OFF \
-                  -DENABLE_TESTS=OFF \
-                  .. && \
-            make -j$(nproc) || echo "First build attempt failed, trying with less parallelism" && \
-            make -j1 && \
-            make install && \
-            echo "Copying necessary BCC libraries and headers" && \
-            mkdir -p /usr/lib/static && \
-            cp -f /usr/lib/libbcc*.a /usr/lib/static/ 2>/dev/null || \
-            (cd .. && \
-             find . -name "*.a" -exec cp {} /usr/lib/static/ \; && \
-             find . -name "*.so" -exec cp {} /usr/lib/ \;) && \
-            ls -la /usr/lib/static/ && \
-            ls -la /usr/lib/libbcc* && \
-            ls -la /usr/include/bcc
+            mkdir -p /usr/include/bcc /usr/aarch64-linux-gnu/include/bcc && \
+            cp -r /src/bcc/src/cc/api/* /usr/include/bcc/ && \
+            cp -r /src/bcc/src/cc/libbpf.h /usr/include/bcc/ && \
+            cp -r /src/bcc/src/cc/bpf_common.h /usr/include/bcc/ && \
+            cp -r /src/bcc/src/cc/api/* /usr/aarch64-linux-gnu/include/bcc/ && \
+            cp -r /src/bcc/src/cc/libbpf.h /usr/aarch64-linux-gnu/include/bcc/ && \
+            cp -r /src/bcc/src/cc/bpf_common.h /usr/aarch64-linux-gnu/include/bcc/
 
-        # 验证库是否已安装
-        RUN find /usr -name "libbcc*" | sort && \
-            find /usr -name "libbpf*" | sort && \
-            echo "检查头文件" && \
-            find /usr/include -name "bcc_*.h" | sort
-
-        # 设置交叉编译环境
-        RUN mkdir -p /usr/aarch64-linux-gnu/include/bpf && \
-            mkdir -p /usr/aarch64-linux-gnu/include/bcc && \
-            cp -r /usr/include/bpf/* /usr/aarch64-linux-gnu/include/bpf/ && \
-            cp -r /usr/include/bcc/* /usr/aarch64-linux-gnu/include/bcc/ && \
-            cp -r /usr/lib/libbcc*.so* /usr/aarch64-linux-gnu/lib/ || true && \
-            cp -r /usr/lib/static/libbcc*.a /usr/aarch64-linux-gnu/lib/ || true && \
-            cp -r /usr/lib64/libbpf.a /usr/aarch64-linux-gnu/lib/ || true
-
-        # 创建所需的符号链接
-        RUN ln -sf /usr/lib/x86_64-linux-gnu/libncurses.a /usr/lib/libtinfo.a || true && \
-            ln -sf /usr/lib/x86_64-linux-gnu/libncurses.a /usr/aarch64-linux-gnu/lib/libtinfo.a || true && \
-            ln -sf /usr/lib/x86_64-linux-gnu/libzstd.a /usr/lib/libzstd.a || true && \
-            ln -sf /usr/lib/x86_64-linux-gnu/libzstd.a /usr/aarch64-linux-gnu/lib/libzstd.a || true
+        # 在这个方法中，我们只使用bpftrace的libbpf后端，不需要bcc的完整构建
 
         WORKDIR /bpftrace
         EOF
@@ -137,40 +113,12 @@ jobs:
         echo "===== 环境信息 ====="
         echo "LLVM版本:"
         llvm-config --version
-        echo "BCC库:"
-        find /usr -name "libbcc*.a" || echo "找不到BCC库"
+        echo "包含头文件目录:"
+        ls -la /usr/include/bcc/
+        ls -la /usr/include/bpf/
         echo "libbpf库:"
-        find /usr -name "libbpf.a" || echo "找不到libbpf库"
-        echo "静态库列表:"
-        find /usr -name "*.a" | sort
+        find /usr -name "libbpf.a"
 
-        # 创建备份
-        cp -f CMakeLists.txt CMakeLists.txt.orig
-        cp -f src/CMakeLists.txt src/CMakeLists.txt.orig
-        cp -f src/ast/CMakeLists.txt src/ast/CMakeLists.txt.orig
-
-        # 直接修改源代码文件以解决依赖问题
-        # 1. 修改主CMakeLists.txt以跳过版本检查
-        sed -i 's/if(LLVM_VERSION VERSION_LESS "16" OR LLVM_VERSION VERSION_GREATER "20")/if(FALSE)/g' CMakeLists.txt
-        sed -i 's/if(NOT LIBBPF_FOUND)/if(FALSE)/g' CMakeLists.txt
-        sed -i 's/message(FATAL_ERROR "bpftrace requires libbpf 1.5 or greater")/message(STATUS "Skipping libbpf version check")/g' CMakeLists.txt
-
-        # 2. 直接删除zstd依赖
-        sed -i '/find_package(zstd)/d' CMakeLists.txt
-
-        # 3. 修改src/CMakeLists.txt中的链接设置
-        sed -i 's/target_link_libraries(libbpftrace ast parser resources arch)/target_link_libraries(libbpftrace ast parser resources arch z lzma zstd ncurses)/g' src/CMakeLists.txt
-        sed -i 's/target_link_libraries(bpftrace libbpftrace)/target_link_libraries(bpftrace libbpftrace z lzma zstd ncurses)/g' src/CMakeLists.txt
-        
-        # 4. 修改src/ast/CMakeLists.txt中的链接设置
-        sed -i 's/target_link_libraries(ast parser)/target_link_libraries(ast parser z lzma zstd ncurses)/g' src/ast/CMakeLists.txt
-        
-        # 5. 移除所有对zstd::libzstd_shared的引用
-        sed -i 's/zstd::libzstd_shared/zstd/g' src/CMakeLists.txt src/ast/CMakeLists.txt
-
-        # 6. 移除所有对Terminfo::terminfo的引用
-        sed -i 's/Terminfo::terminfo/ncurses/g' src/CMakeLists.txt src/ast/CMakeLists.txt
-        
         # 创建交叉编译工具链文件
         cat > arm64_toolchain.cmake << 'CMAKEEOF'
         set(CMAKE_SYSTEM_NAME Linux)
@@ -195,43 +143,32 @@ jobs:
         set(LIBLZMA_LIBRARIES /usr/lib/x86_64-linux-gnu/liblzma.a)
         set(LIBLZMA_INCLUDE_DIRS /usr/include)
         
-        # BCC设置 - 使用找到的库文件
-        set(LIBBCC_LIBRARIES /usr/lib/static/libbcc.a /usr/lib/libbcc.so)
-        set(LIBBCC_INCLUDE_DIRS /usr/include)
-        set(LIBBCC_BPF_LIBRARIES /usr/lib/static/libbcc_bpf.a /usr/lib/libbcc_bpf.so)
-
         # LIBBPF设置
-        set(LIBBPF_LIBRARIES /usr/lib64/libbpf.a)
+        set(LIBBPF_LIBRARIES /usr/lib/libbpf.a)
         set(LIBBPF_INCLUDE_DIRS /usr/include)
+        
+        # BCC头文件目录，但我们不实际链接BCC库
+        set(LIBBCC_INCLUDE_DIRS /usr/include)
         CMAKEEOF
         
         # 创建构建目录
         mkdir -p build-android-arm64
         cd build-android-arm64
         
-        # 配置bpftrace构建
+        # 配置bpftrace构建 - 直接使用LIBBPF后端，不使用BCC
         LLVM_REQUESTED_VERSION=16 cmake .. \
           -DCMAKE_TOOLCHAIN_FILE=../arm64_toolchain.cmake \
           -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_STANDARD=17 \
           -DBUILD_TESTING=OFF \
           -DENABLE_MAN=OFF \
           -DENABLE_LIBDW=OFF \
           -DENABLE_LLVM_JIT=OFF \
           -DBUILD_SHARED_LIBS=OFF \
-          -DSTATIC_LINKING=ON || echo "First attempt failed, trying without STATIC_LINKING"
-        
-        # 如果第一次尝试失败，再尝试不使用STATIC_LINKING
-        if [ ! -f "Makefile" ]; then
-          echo "Retrying with less restrictive static linking options..."
-          LLVM_REQUESTED_VERSION=16 cmake .. \
-            -DCMAKE_TOOLCHAIN_FILE=../arm64_toolchain.cmake \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_TESTING=OFF \
-            -DENABLE_MAN=OFF \
-            -DENABLE_LIBDW=OFF \
-            -DENABLE_LLVM_JIT=OFF \
-            -DBUILD_SHARED_LIBS=OFF
-        fi
+          -DUSE_LIBCC_POINTER_LOOKUP=OFF \
+          -DUSE_LIBBFD=OFF \
+          -DALLOW_UNNECESSARY_LIBBPF=ON \
+          -DENABLE_BPF_MSGTYPES=OFF
           
         # 构建
         make -j$(nproc) VERBOSE=1 || true
@@ -259,8 +196,8 @@ jobs:
           # 额外调试信息
           echo "===== 目录结构 ====="
           find . -type f -name "*.a" | sort
-          echo "===== 链接库信息 ====="
-          find /usr -name "*.a" | xargs ls -la || true
+          echo "===== 编译错误信息 ====="
+          find . -name "*.log" | xargs cat
           
           exit 1
         fi
