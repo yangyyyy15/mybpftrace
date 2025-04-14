@@ -57,7 +57,8 @@ jobs:
             libbz2-dev \
             pkg-config \
             sed \
-            libpcap-dev
+            libpcap-dev \
+            patch
 
         # Install LLVM 16
         RUN wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
@@ -78,6 +79,13 @@ jobs:
         RUN update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-16 100 && \
             update-alternatives --install /usr/bin/clang clang /usr/bin/clang-16 100
             
+        # Install BCC from repository
+        RUN apt-get update && \
+            apt-get install -y software-properties-common && \
+            apt-add-repository -y ppa:hadret/bpfcc && \
+            apt-get update && \
+            apt-get install -y libbpfcc-dev 
+
         # Install libbpf v1.5.0
         WORKDIR /opt
         RUN git clone https://github.com/libbpf/libbpf.git && \
@@ -90,21 +98,6 @@ jobs:
             ls -la /usr/lib/libbpf.a && \
             find /usr/include -name "bpf*.h" | sort && \
             cat /usr/include/bpf/libbpf_version.h
-
-        # Get BCC (both headers and libraries)
-        WORKDIR /opt
-        RUN git clone https://github.com/iovisor/bcc.git -b v0.24.0 && \
-            mkdir -p bcc/build && \
-            cd bcc/build && \
-            cmake .. -DCMAKE_INSTALL_PREFIX=/usr \
-                     -DENABLE_EXAMPLES=OFF \
-                     -DENABLE_MAN=OFF \
-                     -DENABLE_TESTS=OFF \
-                     -DENABLE_TOOLS=OFF && \
-            make -j$(nproc) && \
-            make install && \
-            ls -la /usr/lib/libbcc* || true && \
-            ls -la /usr/include/bcc || true
 
         WORKDIR /bpftrace
         EOF
@@ -122,100 +115,89 @@ jobs:
         echo "LLVM version:"
         llvm-config --version
         echo "Include header directories:"
-        ls -la /usr/include/bcc/
-        ls -la /usr/include/bpf/
+        ls -la /usr/include/bcc/ || echo "BCC include directory not found"
+        ls -la /usr/include/bpf/ || echo "BPF include directory not found"
         echo "libbpf library:"
-        find /usr -name libbpf.a
+        find /usr -name libbpf.a || echo "libbpf.a not found"
         echo "libbcc library:"
-        find /usr -name "libbcc*.a" || true
-        find /usr -name "libbcc*.so" || true
+        find /usr -name "libbcc*.a" || echo "libbcc*.a not found"
+        find /usr -name "libbcc*.so" || echo "libbcc*.so not found"
         echo "libbpf version:"
-        cat /usr/include/bpf/libbpf_version.h
+        cat /usr/include/bpf/libbpf_version.h || echo "libbpf_version.h not found"
         echo "Architecture:"
         uname -m
 
-        # Create patched source directory
-        echo "Creating patched source directory..."
-        mkdir -p /bpftrace-patched
-        cp -r /bpftrace/* /bpftrace-patched/
-        cd /bpftrace-patched
+        # Create a working directory
+        mkdir -p /bpftrace-build
+        cp -r /bpftrace/* /bpftrace-build/
+        cd /bpftrace-build
 
-        # Patch src/CMakeLists.txt to fix zstd references
-        echo "Patching src/CMakeLists.txt for zstd..."
-        grep -r "zstd::libzstd_shared" src || true
-        
-        # Replace zstd::libzstd_shared with ZLIB::ZLIB
-        if grep -q "zstd::libzstd_shared" src/CMakeLists.txt; then
-            sed -i 's/zstd::libzstd_shared/ZLIB::ZLIB/g' src/CMakeLists.txt
-        fi
-        
-        if grep -q "zstd::libzstd_shared" src/ast/CMakeLists.txt; then
-            sed -i 's/zstd::libzstd_shared/ZLIB::ZLIB/g' src/ast/CMakeLists.txt
-        fi
-        
-        # Add more comprehensive modifications to handle libbcc library paths
-        if grep -q "find_package(LibBcc REQUIRED)" CMakeLists.txt; then
-            echo "Modifying CMakeLists.txt for BCC libraries"
-            cat > patch.txt << 'EOL'
-        --- a/CMakeLists.txt
-        +++ b/CMakeLists.txt
-        @@ -80,7 +80,16 @@
-         find_package(LibElf REQUIRED)
-         find_package(ZLIB REQUIRED)
-         
-        -find_package(LibBcc REQUIRED)
-        +find_package(LibBcc)
-        +
-        +# Handle case when BCC is not found
-        +if(NOT LIBBCC_FOUND)
-        +  message(STATUS "Setting manual BCC variables")
-        +  set(LIBBCC_LIBRARIES "/usr/lib/libbcc.a")
-        +  set(LIBBCC_BPF_LIBRARIES "/usr/lib/libbcc_bpf.a")
-        +  set(LIBBCC_LOADER_LIBRARY_STATIC "/usr/lib/libbcc.a")
-        +  set(LIBBCC_INCLUDE_DIRS "/usr/include")
-        +endif()
-        +
+        # Create patches to handle common issues
+        cat > bpftrace_patch.txt << 'PATCH'
+        --- CMakeLists.txt
+        +++ CMakeLists.txt
+        @@ -89,7 +89,7 @@
          find_package(LibBpf)
          
+         if(LIBBPF_FOUND AND LIBBPF_VERSION VERSION_LESS 1.5)
+        -  message(FATAL_ERROR "bpftrace requires libbpf 1.5 or greater")
+        +  message(WARNING "bpftrace prefers libbpf 1.5 or greater, but continuing with what we have")
+         endif()
+         
          option(HAVE_BFD_DISASM "Use libbfd disassembler instead of LLVM" OFF)
-        EOL
-            patch -p1 < patch.txt || true
-        fi
-        
-        # Skip libbpf version check
-        if grep -q "bpftrace requires libbpf" CMakeLists.txt; then
-            echo "Removing libbpf version check"
-            sed -i 's/if(LIBBPF_FOUND AND LIBBPF_VERSION VERSION_LESS.*)/if(FALSE)/' CMakeLists.txt
-        fi
+        PATCH
 
-        echo "Building static bpftrace..."
-        mkdir -p build-android
-        cd build-android
+        # Create a patch for src/CMakeLists.txt
+        cat > src_patch.txt << 'PATCH'
+        --- src/CMakeLists.txt
+        +++ src/CMakeLists.txt
+        @@ -42,7 +42,7 @@
+         add_library(libbpftrace STATIC ${SOURCES})
+         
+         # Used by other programs. We link it statically for now.
+        -target_link_libraries(libbpftrace PRIVATE ${LIBS_TO_LINK} zstd::libzstd_shared)
+        +target_link_libraries(libbpftrace PRIVATE ${LIBS_TO_LINK} zstd)
+         
+         add_executable(bpftrace main.cpp)
+        -target_link_libraries(bpftrace PRIVATE ast libbpftrace zstd::libzstd_shared)
+        +target_link_libraries(bpftrace PRIVATE ast libbpftrace zstd)
+        PATCH
 
-        # Configure with CMake - disable features that may cause issues
+        # Create a patch for ast CMakeLists.txt
+        cat > ast_patch.txt << 'PATCH'
+        --- src/ast/CMakeLists.txt
+        +++ src/ast/CMakeLists.txt
+        @@ -10,5 +10,5 @@
+         add_library(ast STATIC ${SOURCES})
+         
+         # Used by libbpftrace and tool unit tests (main_test.cpp)
+        -target_link_libraries(ast PRIVATE ${LIBBPF_LIBRARIES} ${LLVM_LIBS} zstd::libzstd_shared)
+        +target_link_libraries(ast PRIVATE ${LIBBPF_LIBRARIES} ${LLVM_LIBS} zstd)
+         target_include_directories(ast PUBLIC ${CMAKE_SOURCE_DIR}/src)
+        PATCH
+
+        # Apply the patches
+        patch -p0 < bpftrace_patch.txt || echo "Failed to apply bpftrace patch"
+        patch -p0 < src_patch.txt || echo "Failed to apply src patch"
+        patch -p0 < ast_patch.txt || echo "Failed to apply ast patch"
+
+        # Create a build directory
+        mkdir -p build
+        cd build
+
+        # Configure with CMake
         LLVM_REQUESTED_VERSION=16 cmake .. \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_VERBOSE_MAKEFILE=ON \
           -DBUILD_TESTING=OFF \
           -DSTATIC_LINKING=ON \
-          -DALLOW_UNSAFE_PROBE=ON \
-          -DBUILD_SHARED_LIBS=OFF \
           -DENABLE_MAN=OFF \
-          -DENABLE_LIBBLAZESYM=OFF \
-          -DCMAKE_SKIP_BUILD_RPATH=ON \
-          -DSKIP_BCC_DIRECT_EXPORT=ON \
-          -DHAVE_BCC_PROG_LOAD=OFF \
-          -DHAVE_BCC_CREATE_MAP=OFF
+          -DENABLE_LIBBLAZESYM=OFF
 
-        # Check cmake configurations
-        echo "CMake configuration summary:"
-        grep -r "LIBBCC_" CMakeCache.txt || true
-        grep -r "STATIC_LINKING" CMakeCache.txt || true
-        
-        # Build - first try with multiple cores, fallback to single thread if issues
+        # Build
         make -j$(nproc) VERBOSE=1 || make VERBOSE=1
 
-        # Check for the binary
+        # Check if the binary was successfully built
         if [ -f "src/bpftrace" ]; then
           echo "Build successful!"
           file src/bpftrace
@@ -235,7 +217,7 @@ jobs:
         else
           echo "Build failed - bpftrace binary not found!"
           echo "==== Build Error Information ===="
-          find . -name "*.log" | xargs cat || true
+          find . -name "*.log" -exec cat {} \; || true
           exit 1
         fi
         EOF
