@@ -153,18 +153,54 @@ jobs:
         # ======= FIX C++ ISSUES =======
         echo "Fixing C++ compatibility issues..."
         
-        # Fix cstring_view.h constexpr error - 修复这部分的实现
+        # 完全重写 cstring_view.h 文件以解决构造函数问题
         if [ -f "src/container/cstring_view.h" ]; then
-          echo "Patching cstring_view.h..."
+          echo "Completely rewriting cstring_view.h..."
           
-          # 确保包含 cstring 头文件，以便使用 strlen
-          grep -q "#include <cstring>" src/container/cstring_view.h || sed -i '1i#include <cstring>' src/container/cstring_view.h
+          # 备份原始文件
+          cp src/container/cstring_view.h src/container/cstring_view.h.bak
           
-          # 修复 const char* 构造函数，使用 strlen 计算字符串长度
-          sed -i 's/constexpr cstring_view(const char \*str) noexcept : std::string_view{ str }/constexpr cstring_view(const char *str) noexcept : std::string_view{ str, str ? strlen(str) : 0 }/' src/container/cstring_view.h
+          # 创建新的 cstring_view.h 实现
+          cat > src/container/cstring_view.h << 'CSTRING_VIEW'
+#pragma once
+
+#include <cstring>
+#include <string>
+#include <string_view>
+
+namespace bpftrace {
+
+// A string_view that guarantees that the data it points to
+// is null-terminated. It's useful for interfacing with C
+// APIs that accept char pointers.
+class cstring_view : public std::string_view
+{
+public:
+  // Default constructor
+  constexpr cstring_view() noexcept : std::string_view() { }
+
+  // Constructor for const char*
+  constexpr cstring_view(const char *str) noexcept
+    : std::string_view(str, str ? strlen(str) : 0) { }
+
+  // Non-constexpr constructor for std::string
+  cstring_view(const std::string& str) noexcept
+    : std::string_view(str.c_str(), str.length()) { }
+
+  // Copy constructor
+  constexpr cstring_view(const cstring_view&) noexcept = default;
+
+  // Get a null-terminated C string pointer
+  constexpr const char *c_str() const noexcept
+  {
+    return data();
+  }
+};
+
+} // namespace bpftrace
+CSTRING_VIEW
           
-          # 移除 std::string 构造函数的 constexpr 修饰符，因为 std::string::c_str() 不是 constexpr
-          sed -i 's/constexpr cstring_view(const std::string& str) noexcept/cstring_view(const std::string\& str) noexcept/' src/container/cstring_view.h
+          echo "cstring_view.h has been completely rewritten"
         fi
 
         # ======= FIX ZSTD ISSUES COMPREHENSIVELY =======
