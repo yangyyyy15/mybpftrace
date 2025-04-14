@@ -142,28 +142,57 @@ jobs:
         # 1. Still make LibBcc optional but create dummy lib paths
         if grep -q "find_package(LibBcc REQUIRED)" CMakeLists.txt; then
           echo "Patching CMakeLists.txt to make LibBcc optional"
-          sed -i 's/find_package(LibBcc REQUIRED)/find_package(LibBcc)\nif(NOT LIBBCC_FOUND)\n  set(LIBBCC_LIBRARIES "/usr/lib/libbcc.a")\n  set(LIBBCC_BPF_LIBRARIES "/usr/lib/libbcc.a")\n  set(LIBBCC_LOADER_LIBRARY_STATIC "/usr/lib/libbcc.a")\n  set(LIBBCC_INCLUDE_DIRS "/usr/include")\nendif()/' CMakeLists.txt
+          # Use | as delimiter instead of / to avoid conflicts with paths
+          sed -i 's|find_package(LibBcc REQUIRED)|find_package(LibBcc)\nif(NOT LIBBCC_FOUND)\n  set(LIBBCC_LIBRARIES "/usr/lib/libbcc.a")\n  set(LIBBCC_BPF_LIBRARIES "/usr/lib/libbcc.a")\n  set(LIBBCC_LOADER_LIBRARY_STATIC "/usr/lib/libbcc.a")\n  set(LIBBCC_INCLUDE_DIRS "/usr/include")\nendif()|' CMakeLists.txt
         fi
 
         # 2. Remove the libbpf version check
         if grep -q "bpftrace requires libbpf .* or greater" CMakeLists.txt; then
           echo "Removing libbpf version check"
-          sed -i 's/if(LIBBPF_FOUND AND LIBBPF_VERSION VERSION_LESS.*/if(FALSE)/' CMakeLists.txt
+          sed -i 's|if(LIBBPF_FOUND AND LIBBPF_VERSION VERSION_LESS.*)|if(FALSE)|' CMakeLists.txt
         fi
 
         # 3. Fix zstd library issues - use static zstd instead of shared
         if grep -q "zstd::libzstd_shared" src/CMakeLists.txt; then
           echo "Fixing zstd library references"
-          sed -i 's/zstd::libzstd_shared/zstd::libzstd_static/g' src/CMakeLists.txt
-          sed -i 's/zstd::libzstd_shared/zstd::libzstd_static/g' src/ast/CMakeLists.txt
+          sed -i 's|zstd::libzstd_shared|zstd::libzstd_static|g' src/CMakeLists.txt
+          sed -i 's|zstd::libzstd_shared|zstd::libzstd_static|g' src/ast/CMakeLists.txt
         fi
 
         # 4. Additional fix for zstd not using proper imported targets
         echo "Checking FindZstd.cmake file"
         if [ -f "cmake/FindZstd.cmake" ]; then
           echo "Patching FindZstd.cmake"
-          sed -i 's/add_library(zstd::libzstd_shared UNKNOWN IMPORTED)/add_library(zstd::libzstd_shared STATIC IMPORTED)\nadd_library(zstd::libzstd_static STATIC IMPORTED)/' cmake/FindZstd.cmake
-          sed -i 's/set_target_properties(zstd::libzstd_shared/set_target_properties(zstd::libzstd_shared zstd::libzstd_static/' cmake/FindZstd.cmake
+          sed -i 's|add_library(zstd::libzstd_shared UNKNOWN IMPORTED)|add_library(zstd::libzstd_shared STATIC IMPORTED)\nadd_library(zstd::libzstd_static STATIC IMPORTED)|' cmake/FindZstd.cmake
+          sed -i 's|set_target_properties(zstd::libzstd_shared|set_target_properties(zstd::libzstd_shared zstd::libzstd_static|' cmake/FindZstd.cmake
+        fi
+
+        # 5. Create a simple patch file for more complex changes
+        cat > bcc_patch.txt << 'PATCH'
+        --- CMakeLists.txt.orig
+        +++ CMakeLists.txt
+        @@ -80,7 +80,14 @@
+         find_package(LibElf REQUIRED)
+         find_package(ZLIB REQUIRED)
+         
+        -find_package(LibBcc REQUIRED)
+        +find_package(LibBcc)
+        +if(NOT LIBBCC_FOUND)
+        +  set(LIBBCC_LIBRARIES "/usr/lib/libbcc.a")
+        +  set(LIBBCC_BPF_LIBRARIES "/usr/lib/libbcc.a")
+        +  set(LIBBCC_LOADER_LIBRARY_STATIC "/usr/lib/libbcc.a")
+        +  set(LIBBCC_INCLUDE_DIRS "/usr/include")
+        +endif()
+        +
+         find_package(LibBpf)
+         
+         option(HAVE_BFD_DISASM "Use libbfd disassembler instead of LLVM" OFF)
+        PATCH
+
+        # Apply the patch if the sed command failed
+        if ! grep -q "if(NOT LIBBCC_FOUND)" CMakeLists.txt; then
+          echo "Applying patch file for BCC setup"
+          patch -p0 < bcc_patch.txt || echo "Patch may have failed, continuing anyway"
         fi
 
         echo "Building static bpftrace..."
@@ -208,7 +237,7 @@ jobs:
         else
           echo "Build failed - bpftrace binary not found!"
           echo "==== Build Error Information ===="
-          find . -name "*.log" | xargs cat
+          find . -name "*.log" | xargs cat || true
           exit 1
         fi
         EOF
