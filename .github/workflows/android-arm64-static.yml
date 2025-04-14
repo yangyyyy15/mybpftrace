@@ -144,8 +144,8 @@ jobs:
         cd /bpftrace-build
 
         # Get zstd paths for later use
-        ZSTD_LIB_PATH=$(find /usr -name "libzstd.a" -print -quit)
-        ZSTD_INCLUDE_PATH=$(dirname $(find /usr -name "zstd.h" -print -quit))
+        ZSTD_LIB_PATH=$(find /usr -name libzstd.a -print -quit)
+        ZSTD_INCLUDE_PATH=$(dirname $(find /usr -name zstd.h -print -quit))
 
         echo "Using zstd library at: ${ZSTD_LIB_PATH}"
         echo "Using zstd include at: ${ZSTD_INCLUDE_PATH}"
@@ -153,10 +153,18 @@ jobs:
         # ======= FIX C++ ISSUES =======
         echo "Fixing C++ compatibility issues..."
         
-        # Fix cstring_view.h constexpr error - modify constructor to avoid using std::string_view constructor
+        # Fix cstring_view.h constexpr error - 修复这部分的实现
         if [ -f "src/container/cstring_view.h" ]; then
           echo "Patching cstring_view.h..."
-          sed -i 's/: std::string_view{ str }/: std::string_view{ str.c_str(), str.length() }/' src/container/cstring_view.h
+          
+          # 确保包含 cstring 头文件，以便使用 strlen
+          grep -q "#include <cstring>" src/container/cstring_view.h || sed -i '1i#include <cstring>' src/container/cstring_view.h
+          
+          # 修复 const char* 构造函数，使用 strlen 计算字符串长度
+          sed -i 's/constexpr cstring_view(const char \*str) noexcept : std::string_view{ str }/constexpr cstring_view(const char *str) noexcept : std::string_view{ str, str ? strlen(str) : 0 }/' src/container/cstring_view.h
+          
+          # 移除 std::string 构造函数的 constexpr 修饰符，因为 std::string::c_str() 不是 constexpr
+          sed -i 's/constexpr cstring_view(const std::string& str) noexcept/cstring_view(const std::string\& str) noexcept/' src/container/cstring_view.h
         fi
 
         # ======= FIX ZSTD ISSUES COMPREHENSIVELY =======
