@@ -20,7 +20,7 @@ jobs:
         ENV DEBIAN_FRONTEND=noninteractive
         ENV TZ=Etc/UTC
 
-        # 安装基本依赖
+        # 安装基本依赖 (添加了一些额外的依赖)
         RUN apt-get update && apt-get install -y \
             build-essential \
             cmake \
@@ -44,7 +44,11 @@ jobs:
             libtool \
             binutils-aarch64-linux-gnu \
             gcc-aarch64-linux-gnu \
-            g++-aarch64-linux-gnu
+            g++-aarch64-linux-gnu \
+            libdwarf-dev \
+            libdw-dev \
+            libopcodes-dev \
+            libxml2-dev
 
         # 安装LLVM 16
         RUN wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
@@ -65,16 +69,17 @@ jobs:
         # 创建ARM64的库目录
         RUN mkdir -p /usr/aarch64-linux-gnu/lib /usr/aarch64-linux-gnu/include
 
-        # 从源码编译libbpf
+        # 从源码编译libbpf (指定版本并使用静态构建)
         WORKDIR /src
-        RUN git clone --recursive https://github.com/libbpf/libbpf.git && \
+        RUN git clone --recursive https://github.com/libbpf/libbpf.git -b v1.2.0 && \
             cd libbpf/src && \
             make BUILD_STATIC_ONLY=y && \
             DESTDIR=/ make install prefix=/usr && \
             DESTDIR=/ make install_uapi_headers prefix=/usr
 
-        # 编译BCC
-        RUN git clone https://github.com/iovisor/bcc.git && \
+        # 编译BCC (修改为使用静态库)
+        WORKDIR /src
+        RUN git clone https://github.com/iovisor/bcc.git -b v0.26.0 && \
             cd bcc && \
             mkdir build && \
             cd build && \
@@ -82,21 +87,26 @@ jobs:
                   -DENABLE_EXAMPLES=OFF \
                   -DENABLE_MAN=OFF \
                   -DENABLE_TESTS=OFF \
+                  -DBUILD_SHARED_LIBS=OFF \
+                  -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
                   .. && \
-            make -j$(nproc) && \
+            make -j$(nproc) VERBOSE=1 && \
             make install
 
+        # 验证静态库是否已安装
+        RUN find /usr -name "*.a" | grep -E '(bcc|bpf)' || echo "静态库未找到"
+
         # 设置交叉编译环境
-        RUN cp -r /usr/include/bpf /usr/aarch64-linux-gnu/include/ && \
-            ln -sf /usr/lib64/libbpf.a /usr/aarch64-linux-gnu/lib/ && \
-            ln -sf /usr/lib/libbcc.a /usr/aarch64-linux-gnu/lib/ && \
-            ln -sf /usr/lib/libbcc_bpf.a /usr/aarch64-linux-gnu/lib/ || true
+        RUN mkdir -p /usr/aarch64-linux-gnu/include/bpf && \
+            cp -r /usr/include/bpf/* /usr/aarch64-linux-gnu/include/bpf/ && \
+            cp -r /usr/lib/libbcc*.a /usr/aarch64-linux-gnu/lib/ || true && \
+            cp -r /usr/lib64/libbpf.a /usr/aarch64-linux-gnu/lib/ || true
 
         # 创建所需的符号链接
-        RUN ln -sf /usr/lib/x86_64-linux-gnu/libncurses.a /usr/lib/libtinfo.a && \
-            ln -sf /usr/lib/x86_64-linux-gnu/libncurses.a /usr/aarch64-linux-gnu/lib/libtinfo.a && \
-            ln -sf /usr/lib/x86_64-linux-gnu/libzstd.a /usr/lib/libzstd.a && \
-            ln -sf /usr/lib/x86_64-linux-gnu/libzstd.a /usr/aarch64-linux-gnu/lib/libzstd.a
+        RUN ln -sf /usr/lib/x86_64-linux-gnu/libncurses.a /usr/lib/libtinfo.a || true && \
+            ln -sf /usr/lib/x86_64-linux-gnu/libncurses.a /usr/aarch64-linux-gnu/lib/libtinfo.a || true && \
+            ln -sf /usr/lib/x86_64-linux-gnu/libzstd.a /usr/lib/libzstd.a || true && \
+            ln -sf /usr/lib/x86_64-linux-gnu/libzstd.a /usr/aarch64-linux-gnu/lib/libzstd.a || true
 
         WORKDIR /bpftrace
         EOF
@@ -114,9 +124,11 @@ jobs:
         echo "LLVM版本:"
         llvm-config --version
         echo "BCC库:"
-        ls -la /usr/lib/libbcc* || echo "找不到BCC库"
+        find /usr -name "libbcc*.a" || echo "找不到BCC库"
         echo "libbpf库:"
-        ls -la /usr/lib64/libbpf* || echo "找不到libbpf库"
+        find /usr -name "libbpf.a" || echo "找不到libbpf库"
+        echo "静态库列表:"
+        find /usr -name "*.a" | sort
 
         # 创建备份
         cp -f CMakeLists.txt CMakeLists.txt.orig
@@ -192,7 +204,8 @@ jobs:
           -DENABLE_LIBDW=OFF \
           -DENABLE_LLVM_JIT=OFF \
           -DBUILD_SHARED_LIBS=OFF \
-          -DSTATIC_LINKING=ON
+          -DSTATIC_LINKING=ON \
+          -DSTATIC_LIBC=ON
           
         # 构建
         make -j$(nproc) VERBOSE=1 || true
@@ -216,6 +229,12 @@ jobs:
           cat CMakeFiles/CMakeError.log || true
           echo "==== CMake输出日志 ===="
           cat CMakeFiles/CMakeOutput.log || true
+          
+          # 额外调试信息
+          echo "===== 目录结构 ====="
+          find . -type f -name "*.a" | sort
+          echo "===== 链接库信息 ====="
+          find /usr -name "*.a" | xargs ls -la || true
           
           exit 1
         fi
