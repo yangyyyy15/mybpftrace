@@ -218,7 +218,11 @@ jobs:
           # 修复不返回值的函数
           sed -i '/LOG(BUG) << "invalid probe attachtype "/a\      return static_cast<bpf_probe_attach_type>(0); // Default return to fix build error' src/attached_probe.cpp
           sed -i '/LOG(BUG) << "invalid program type: "/a\      return "unknown"; // Default return to fix build error' src/attached_probe.cpp
-          sed -i '/AttachedProbe::eventname() const/,/^}/ s/^}$/  return ""; // Default return to fix build error\n}/' src/attached_probe.cpp
+          
+          # 修复了的 eventname 函数处理方法
+          sed -i '/AttachedProbe::eventname() const/,/^}/ {
+            s/^}$/  return ""; \/\/ Default return to fix build error\n}/
+          }' src/attached_probe.cpp
           
           echo "attached_probe.cpp has been patched"
         fi
