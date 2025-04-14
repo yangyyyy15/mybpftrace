@@ -153,10 +153,39 @@ jobs:
         # ======= FIX C++ ISSUES =======
         echo "Fixing C++ compatibility issues..."
         
-        # Fix cstring_view.h constexpr error - modify constructor to avoid using std::string_view constructor
+        # Fix cstring_view.h constexpr error by completely replacing the file with a fixed version
         if [ -f "src/container/cstring_view.h" ]; then
           echo "Patching cstring_view.h..."
-          sed -i 's/: std::string_view{ str }/: std::string_view{ str.c_str(), str.length() }/' src/container/cstring_view.h
+          cat > src/container/cstring_view.h << 'CSTRING_VIEW_H'
+#pragma once
+
+#include <string>
+#include <string_view>
+
+namespace bpftrace {
+
+// A string_view that ALWAYS contains a single NULL terminator at the end.
+// Only a very specific subset of string_view functionality is implemented.
+class cstring_view : public std::string_view
+{
+public:
+  // Default constructor
+  constexpr cstring_view() noexcept : std::string_view() { }
+  
+  // Constructor for C-string (const char*)
+  constexpr cstring_view(const char *str) noexcept 
+    : std::string_view(str) { }
+  
+  // Constructor for std::string - cannot be constexpr due to c_str() limitations
+  cstring_view(const std::string &str) 
+    : std::string_view(str.c_str(), str.length()) { }
+  
+  // Remove any constructors/operations that would
+  // not guarantee the buffer is NULL terminated
+};
+
+} // namespace bpftrace
+CSTRING_VIEW_H
         fi
 
         # ======= FIX ZSTD ISSUES COMPREHENSIVELY =======
@@ -281,16 +310,13 @@ jobs:
           set(ZSTD_INCLUDE_DIR "'${ZSTD_INCLUDE_PATH}'")\
           include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/custom/zstd.cmake)' CMakeLists.txt
         fi
-        
-        # Add C++17 compatibility fixes to the CMakeLists.txt
-        sed -i 's/set(CMAKE_CXX_STANDARD 20)/set(CMAKE_CXX_STANDARD 17)/' CMakeLists.txt
 
         # Create build directory
         mkdir -p build
         cd build
 
-        # Configure with CMake - using C++17 instead of C++20 to avoid compatibility issues
-        echo "=== Trying CMake configuration with C++17 ==="
+        # Configure with CMake - with relaxed warnings
+        echo "=== Trying CMake configuration with relaxed warnings ==="
         LLVM_REQUESTED_VERSION=16 cmake .. \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_VERBOSE_MAKEFILE=ON \
@@ -301,12 +327,11 @@ jobs:
           -DZSTD_INCLUDE_DIR=${ZSTD_INCLUDE_PATH} \
           -DCMAKE_MODULE_PATH=/bpftrace-build/cmake/custom:/bpftrace-build/cmake/modules \
           -DCMAKE_PREFIX_PATH=/bpftrace-build/cmake/custom \
-          -DCMAKE_CXX_STANDARD=17 \
-          -DCMAKE_CXX_FLAGS="-Wno-error=missing-field-initializers"
+          -DCMAKE_CXX_FLAGS="-Wno-error -Wno-unused-result -Wno-deprecated-declarations -Wno-strict-aliasing"
 
         # Build the project
         echo "=== Building bpftrace ==="
-        make -j$(nproc) || make
+        make -j$(nproc) VERBOSE=1 || make VERBOSE=1
 
         # Check if the binary was successfully built
         if [ -f "src/bpftrace" ]; then
