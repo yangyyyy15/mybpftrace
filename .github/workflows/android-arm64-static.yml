@@ -52,7 +52,7 @@ jobs:
             binutils-dev \
             libxml2-dev \
             pkg-config \
-            patch
+            sed
 
         # Install LLVM 16
         RUN wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
@@ -156,29 +156,20 @@ jobs:
         set(LIBBPF_LIBRARIES /usr/aarch64-linux-gnu/lib/libbpf.a)
         set(LIBBPF_INCLUDE_DIRS /usr/include)
         CMAKEEOF
-
-        # Patch CMakeLists.txt to skip BCC library check when using libbpf only
-        cat > cmake_patch.txt << 'PATCH'
-        --- a/CMakeLists.txt
-        +++ b/CMakeLists.txt
-        @@ -80,7 +80,12 @@ include(CTest)
-         find_package(LibElf REQUIRED)
-         find_package(ZLIB REQUIRED)
-         
-        -find_package(LibBcc REQUIRED)
-        +# Option to build with libbpf backend only (no BCC)
-        +option(USE_LIBBPF_ONLY "Build with libbpf backend only, no BCC dependency" OFF)
-        +if(NOT USE_LIBBPF_ONLY)
-        +  find_package(LibBcc REQUIRED)
-        +endif()
-        +
-         find_package(LibBpf)
-         
-         option(HAVE_BFD_DISASM "Use libbfd disassembler instead of LLVM" OFF)
-        PATCH
-
-        # Apply the patch
-        patch -p1 < cmake_patch.txt
+        
+        # Modify CMakeLists.txt directly instead of using a patch
+        # This is more reliable since it doesn't depend on exact file content matching
+        echo "Modifying CMakeLists.txt to enable libbpf-only mode..."
+        
+        # 1. Add the USE_LIBBPF_ONLY option
+        sed -i '/option(ENABLE_MAN/i option(USE_LIBBPF_ONLY "Build with libbpf backend only, no BCC dependency" OFF)\n' CMakeLists.txt
+        
+        # 2. Find the line with find_package(LibBcc REQUIRED) and replace it with conditional code
+        sed -i 's/find_package(LibBcc REQUIRED)/if(NOT USE_LIBBPF_ONLY)\n  find_package(LibBcc REQUIRED)\nendif()/' CMakeLists.txt
+        
+        # 3. Check if the changes were successfully applied
+        grep "USE_LIBBPF_ONLY" CMakeLists.txt || echo "Failed to add USE_LIBBPF_ONLY option!"
+        grep -A3 "if(NOT USE_LIBBPF_ONLY)" CMakeLists.txt || echo "Failed to modify LibBcc dependency!"
 
         # Create build directory
         mkdir -p build-android-arm64
@@ -206,7 +197,7 @@ jobs:
           -DALLOW_UNSAFE_PROBE=ON \
           -DALLOW_UNNECESSARY_LIBBPF=ON \
           -DENABLE_BPF_MSGTYPES=OFF
-
+          
         # Build
         make -j$(nproc) VERBOSE=1
 
