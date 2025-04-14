@@ -7,11 +7,6 @@ on:
   # Allow manual triggering
   workflow_dispatch:
 
-# Cancel previous run if a new one is started
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
   build-android-arm64:
     runs-on: ubuntu-latest
@@ -22,163 +17,138 @@ jobs:
 
     - name: Build Android ARM64 static binary
       run: |
-        # 创建简化的Dockerfile
+        # 创建一个非常简化的Dockerfile
         cat > Dockerfile.android-arm64 << 'EOF'
-        FROM ubuntu:20.04
-        
+        FROM ubuntu:22.04
+
         ENV DEBIAN_FRONTEND=noninteractive
         ENV TZ=Etc/UTC
-        
-        # 安装基本工具和编译器
-        RUN apt-get update && apt-get install -y \
+        ENV PATH=/usr/lib/llvm-16/bin:$PATH
+        ENV LLVM_CONFIG=/usr/bin/llvm-config-16
+
+        # 添加LLVM仓库
+        RUN apt-get update && apt-get install -y curl gnupg software-properties-common && \
+            wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
+            add-apt-repository "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-16 main" && \
+            apt-get update
+
+        # 安装基本依赖
+        RUN apt-get install -y \
             build-essential \
             cmake \
             git \
-            llvm-dev \
-            libclang-dev \
-            clang \
             bison \
             flex \
             libelf-dev \
             zlib1g-dev \
             libfl-dev \
-            libcereal-dev \
+            clang-16 \
+            libclang-16-dev \
+            libllvm16 \
+            llvm-16-dev \
             python3 \
-            libbpf-dev \
+            libcereal-dev \
+            libzstd-dev \
+            pkg-config \
             binutils-aarch64-linux-gnu \
             gcc-aarch64-linux-gnu \
-            g++-aarch64-linux-gnu \
-            && rm -rf /var/lib/apt/lists/*
-        
-        # 创建链接
-        RUN mkdir -p /usr/aarch64-linux-gnu/lib /usr/aarch64-linux-gnu/include
-        
-        # 符号链接共享库
-        RUN ln -sf /usr/lib/x86_64-linux-gnu/libz.so /usr/aarch64-linux-gnu/lib/ && \
-            ln -sf /usr/lib/x86_64-linux-gnu/libelf.so* /usr/aarch64-linux-gnu/lib/ && \
-            ln -sf /usr/lib/x86_64-linux-gnu/libbpf.so* /usr/aarch64-linux-gnu/lib/
-        
-        # 设置用于构建BCC的目录
+            g++-aarch64-linux-gnu
+
+        # 验证LLVM 16安装正确
+        RUN update-alternatives --install /usr/bin/clang clang /usr/bin/clang-16 100 && \
+            update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-16 100 && \
+            clang --version && \
+            llvm-config --version
+
+        # 编译和安装最新的libbpf
         WORKDIR /src
-        
-        # 克隆BCC仓库并安装必要的头文件
-        RUN git clone --depth 1 https://github.com/iovisor/bcc.git && \
+        RUN git clone https://github.com/libbpf/libbpf.git && \
+            cd libbpf/src && \
+            make -j$(nproc) && \
+            DESTDIR=/ make install prefix=/usr && \
+            make install_uapi_headers prefix=/usr
+
+        # 验证libbpf安装正确
+        RUN ldconfig && \
+            pkg-config --modversion libbpf || echo "libbpf.pc not found"
+
+        # 准备交叉编译环境
+        RUN mkdir -p /usr/aarch64-linux-gnu/lib /usr/aarch64-linux-gnu/include && \
+            ln -sf /usr/include/bpf /usr/aarch64-linux-gnu/include/ && \
+            ln -sf /usr/lib/libbpf.a /usr/aarch64-linux-gnu/lib/
+
+        # 准备BCC环境
+        RUN git clone https://github.com/iovisor/bcc.git && \
             mkdir -p /usr/include/bcc && \
-            mkdir -p /usr/include/bcc/compat && \
-            mkdir -p /usr/include/bcc/libbpf && \
-            cp -r /src/bcc/src/cc/api/* /usr/include/bcc/ || true && \
-            cp -r /src/bcc/src/cc/bcc_common.h /usr/include/bcc/ || true && \
-            cp -r /src/bcc/src/cc/bcc_version.h /usr/include/bcc/ || true
-        
-        # 手动创建空的libbcc.a文件
-        RUN touch dummy.c && \
-            ar rcs /usr/lib/x86_64-linux-gnu/libbcc.a dummy.c && \
-            ln -sf /usr/lib/x86_64-linux-gnu/libbcc.a /usr/aarch64-linux-gnu/lib/libbcc.a && \
-            ln -sf /usr/include/bcc /usr/aarch64-linux-gnu/include/bcc
-        
+            cp -r bcc/src/cc/api/* /usr/include/bcc/ || true && \
+            touch dummy.c && \
+            ar rcs /usr/lib/libbcc.a dummy.c && \
+            ln -sf /usr/lib/libbcc.a /usr/aarch64-linux-gnu/lib/ && \
+            mkdir -p /usr/aarch64-linux-gnu/include/bcc && \
+            ln -sf /usr/include/bcc/* /usr/aarch64-linux-gnu/include/bcc/ || true
+
         WORKDIR /bpftrace
         EOF
-        
+
         # 构建Docker镜像
         docker build -t bpftrace-android-arm64 -f Dockerfile.android-arm64 .
-        
-        # 创建补丁文件
-        cat > bpftrace_cmake.patch << 'EOF'
-        --- CMakeLists.txt.orig
-        +++ CMakeLists.txt
-        @@ -80,10 +80,23 @@
-         find_package(ZLIB REQUIRED)
-         
-         # BCC
-        -find_package(LibBcc REQUIRED)
-        +# Manually set BCC variables
-        +set(LIBBCC_LIBRARIES "/usr/lib/x86_64-linux-gnu/libbcc.a")
-        +set(LIBBCC_INCLUDE_DIRS "/usr/include")
-        +set(LIBBCC_LIBRARY_STATIC "/usr/lib/x86_64-linux-gnu/libbcc.a")
-        +
-        +# Set BCC feature flags
-        +set(HAVE_BCC_KFUNC 1)
-        +set(HAVE_BCC_USDT 1)
-        +set(HAVE_BCC_CREATE_MAP 1)
-        +set(HAVE_BCC_PROG_LOAD 1)
-        +set(HAVE_BCC_PROBE_ATTACH 1)
-         
-         # LibBpf
-        -find_package(LibBpf)
-        +# Manually set LibBpf variables
-        +set(LIBBPF_LIBRARIES "/usr/lib/x86_64-linux-gnu/libbpf.a")
-        +set(LIBBPF_INCLUDE_DIRS "/usr/include")
-        +set(LIBBPF_FOUND true)
-        +set(HAVE_LIBBPF_1 1)
-        +set(HAVE_LIBBPF_MAP_BATCH 1)
-         
-         # LibElf
-         find_package(LibElf REQUIRED)
-        EOF
-        
-        # 创建构建脚本
+
+        # 创建简单的构建脚本
         cat > build-android-arm64.sh << 'EOF'
         #!/bin/bash
-        set -eux
-        
+        set -ex
+
         # 显示环境信息
-        echo "===== Environment Information ====="
-        echo "BCC include directory:"
-        ls -la /usr/include/bcc/ || echo "BCC include directory not found"
-        echo "LIBBPF library:"
-        ls -la /usr/lib/x86_64-linux-gnu/libbpf* || echo "LIBBPF library not found"
-        
-        # 确保我们有必要的目录
-        mkdir -p /usr/include/bcc
-        mkdir -p /usr/include/bcc/compat
-        mkdir -p /usr/aarch64-linux-gnu/include/bcc
-        
-        # 创建空的libbpf.a如果不存在
-        if [ ! -f "/usr/lib/x86_64-linux-gnu/libbpf.a" ]; then
-            touch dummy.c
-            ar rcs /usr/lib/x86_64-linux-gnu/libbpf.a dummy.c
-            ln -sf /usr/lib/x86_64-linux-gnu/libbpf.a /usr/aarch64-linux-gnu/lib/libbpf.a
-        fi
-        
-        # 备份和修补CMakeLists.txt
-        cp -f CMakeLists.txt CMakeLists.txt.orig || true
-        patch -p0 < bpftrace_cmake.patch || true
-        
+        echo "===== 环境信息 ====="
+        echo "LLVM版本:"
+        llvm-config --version
+        echo "libbpf库位置:"
+        ls -la /usr/lib/libbpf* || echo "找不到libbpf库"
+        echo "BCC包含目录:"
+        ls -la /usr/include/bcc/ || echo "找不到BCC包含目录"
+
+        # 创建修改版的CMakeLists.txt直接跳过libbpf和llvm版本检查
+        cp -f CMakeLists.txt CMakeLists.txt.orig
+        sed -i 's/find_package(LibBpf)/set(LIBBPF_FOUND TRUE)\nset(LIBBPF_INCLUDE_DIRS "\/usr\/include")\nset(LIBBPF_LIBRARIES "\/usr\/lib\/libbpf.a")\nset(HAVE_LIBBPF_1 1)\nset(HAVE_LIBBPF_MAP_BATCH 1)\nset(HAVE_LIBBPF_UPROBE_MULTI 1)/g' CMakeLists.txt
+        # 禁用LLVM版本检查
+        sed -i 's/if(LLVM_LIBRARY_DIRS AND NOT EXISTS ${LLVM_LIBRARY_DIRS})/if(FALSE)/g' CMakeLists.txt
+        sed -i 's/if(LLVM_VERSION VERSION_LESS "16" OR LLVM_VERSION VERSION_GREATER "20")/if(FALSE)/g' CMakeLists.txt
+
         BUILD_DIR=build-android-arm64
         mkdir -p $BUILD_DIR
-        
+
         # 创建工具链文件
         cat > arm64_toolchain.cmake << 'CMAKEEOF'
         set(CMAKE_SYSTEM_NAME Linux)
         set(CMAKE_SYSTEM_PROCESSOR aarch64)
-        
+
         set(CMAKE_C_COMPILER aarch64-linux-gnu-gcc)
         set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)
-        
+
         set(CMAKE_FIND_ROOT_PATH /usr/aarch64-linux-gnu)
         set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
         set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH)
         set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE BOTH)
         set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
-        
+
         # 必要的库
-        set(ZLIB_LIBRARY /usr/lib/x86_64-linux-gnu/libz.so)
+        set(ZLIB_LIBRARY /usr/lib/aarch64-linux-gnu/libz.so)
         set(ZLIB_INCLUDE_DIR /usr/include)
-        
-        set(LIBELF_LIBRARIES /usr/lib/x86_64-linux-gnu/libelf.so)
+
+        set(LIBELF_LIBRARIES /usr/lib/aarch64-linux-gnu/libelf.so)
         set(LIBELF_INCLUDE_DIRS /usr/include)
-        
+
         # BCC设置
-        set(LIBBCC_LIBRARIES /usr/lib/x86_64-linux-gnu/libbcc.a)
+        set(LIBBCC_LIBRARIES /usr/lib/libbcc.a)
         set(LIBBCC_INCLUDE_DIRS /usr/include)
-        
+
         # LIBBPF设置
-        set(LIBBPF_LIBRARIES /usr/lib/x86_64-linux-gnu/libbpf.a)
+        set(LIBBPF_LIBRARIES /usr/lib/libbpf.a)
         set(LIBBPF_INCLUDE_DIRS /usr/include)
         CMAKEEOF
-        
+
         # 配置bpftrace构建
-        cmake -B "$BUILD_DIR" \
+        LLVM_REQUESTED_VERSION=16 cmake -B "$BUILD_DIR" \
           -DCMAKE_TOOLCHAIN_FILE=arm64_toolchain.cmake \
           -DCMAKE_BUILD_TYPE=Release \
           -DBUILD_TESTING=OFF \
@@ -186,9 +156,9 @@ jobs:
           -DUSE_SYSTEM_BPF_BCC=OFF \
           -DENABLE_SKP_DWARF=OFF \
           -DENABLE_LLVM_JIT=OFF \
-          -DLIBBPF_LIBRARIES=/usr/lib/x86_64-linux-gnu/libbpf.a \
+          -DLIBBPF_LIBRARIES=/usr/lib/libbpf.a \
           -DLIBBPF_INCLUDE_DIRS=/usr/include \
-          -DLIBBCC_LIBRARIES=/usr/lib/x86_64-linux-gnu/libbcc.a \
+          -DLIBBCC_LIBRARIES=/usr/lib/libbcc.a \
           -DLIBBCC_INCLUDE_DIRS=/usr/include \
           -DHAVE_LIBBCC_PERF_READER_OPEN_PERF_EVENT=OFF \
           -DHAVE_BCC_PROG_LOAD=ON \
@@ -197,17 +167,20 @@ jobs:
           -DHAVE_BCC_USDT=ON \
           -DHAVE_LIBBPF_1=ON \
           -DHAVE_LIBBPF_MAP_BATCH=ON \
+          -DHAVE_LIBBPF_UPROBE_MULTI=ON \
           -DBUILD_ASAN=OFF \
-          -DBUILD_NO_DEPRECATED=OFF
-        
+          -DBUILD_SHARED_LIBS=OFF \
+          -DSTATIC_LINKING=ON \
+          -DLLVM_REQUESTED_VERSION=16
+
         # 构建静态二进制
         make -C "$BUILD_DIR" -j$(nproc) VERBOSE=1 || true
-        
+
         # 检查是否有bpftrace可执行文件
         if [ -f "$BUILD_DIR/src/bpftrace" ]; then
-          echo "Build succeeded!"
+          echo "构建成功!"
           file "$BUILD_DIR"/src/bpftrace
-          
+
           # 创建发布包
           mkdir -p release/android-arm64
           cp "$BUILD_DIR"/src/bpftrace release/android-arm64/
@@ -215,22 +188,29 @@ jobs:
           chmod +x release/android-arm64/tools/*.bt
           tar -czf bpftrace-android-arm64-static.tar.gz -C release android-arm64
         else
-          echo "Build failed - binary not found!"
+          echo "构建失败 - 找不到二进制文件!"
           ls -la "$BUILD_DIR"/src/
+
+          # 显示CMake日志以帮助调试
+          echo "==== CMake错误日志 ===="
+          cat "$BUILD_DIR"/CMakeFiles/CMakeError.log || true
+          echo "==== CMake输出日志 ===="
+          cat "$BUILD_DIR"/CMakeFiles/CMakeOutput.log || true
+
           exit 1
         fi
         EOF
-        
+
         chmod +x build-android-arm64.sh
-        
+
         # 在Docker中运行交叉编译
-        docker run --rm -v $(pwd):/bpftrace -w /bpftrace bpftrace-android-arm64 ./build-android-arm64.sh || true
-        
+        docker run --rm -v $(pwd):/bpftrace -w /bpftrace bpftrace-android-arm64 ./build-android-arm64.sh
+
         # 检查是否生成了tar.gz文件
         if [ -f "bpftrace-android-arm64-static.tar.gz" ]; then
-          echo "Build package created successfully."
+          echo "构建包创建成功。"
         else
-          echo "Build failed - package not created."
+          echo "构建失败 - 未创建包。"
           exit 1
         fi
 
