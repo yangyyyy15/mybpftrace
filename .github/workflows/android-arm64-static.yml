@@ -273,11 +273,10 @@ jobs:
           include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/custom/zstd.cmake)' CMakeLists.txt
         fi
 
-        # Create build directory
+        # Create build directory and proceed with first configuration approach
         mkdir -p build
         cd build
-
-        # Configure with CMake - first approach with all modules
+        
         echo "=== Trying first CMake configuration approach ==="
         LLVM_REQUESTED_VERSION=16 cmake .. \
           -DCMAKE_BUILD_TYPE=Release \
@@ -290,136 +289,56 @@ jobs:
           -DCMAKE_MODULE_PATH=/bpftrace-build/cmake/custom:/bpftrace-build/cmake/modules \
           -DCMAKE_PREFIX_PATH=/bpftrace-build/cmake/custom
 
-        # If the above configuration fails, try second approach
-        if [ $? -ne 0 ]; then
-          echo "=== First approach failed, trying second CMake configuration approach ==="
+        # If the configuration succeeds, attempt the build
+        if [ $? -eq 0 ]; then
+          echo "=== CMake configuration successful, attempting build ==="
+          make -j$(nproc) VERBOSE=1 || make VERBOSE=1
+        else
+          echo "=== First approach failed, trying second approach ==="
           cd ..
           rm -rf build
           mkdir -p build
           cd build
           
-          # Create a simple CMake module that directly defines the zstd target
-          mkdir -p modules
-          cat > modules/DirectZstd.cmake << 'DIRECT_CMAKE'
-          # Direct zstd definition pre-included in flags
-          if(NOT TARGET zstd)
-            add_library(zstd STATIC IMPORTED)
-            set_target_properties(zstd PROPERTIES
-              IMPORTED_LOCATION "${ZSTD_LIBRARY}"
-              INTERFACE_INCLUDE_DIRECTORIES "${ZSTD_INCLUDE_DIR}"
-            )
-          endif()
-          
-          if(NOT TARGET zstd::libzstd_shared)
-            add_library(zstd::libzstd_shared ALIAS zstd)
-          endif()
-          DIRECT_CMAKE
-          
-          # Try with special flags to include the module
+          # Try simpler CMake configuration
           LLVM_REQUESTED_VERSION=16 cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_VERBOSE_MAKEFILE=ON \
             -DBUILD_TESTING=OFF \
             -DSTATIC_LINKING=ON \
             -DENABLE_MAN=OFF \
-            -DZSTD_INCLUDE_DIR=${ZSTD_INCLUDE_PATH} \
             -DZSTD_LIBRARY=${ZSTD_LIB_PATH} \
-            -DCMAKE_MODULE_PATH=$(pwd)/modules
-        fi
-
-        # If that still doesn't work, try direct source modification approach
-        if [ $? -ne 0 ]; then
-          echo "=== Second approach failed, trying third approach with direct source modifications ==="
-          cd ..
-          rm -rf build
+            -DZSTD_INCLUDE_DIR=${ZSTD_INCLUDE_PATH}
           
-          echo "Creating direct patches for CMakeLists.txt files..."
-          
-          for cmake_file in $(find . -name "CMakeLists.txt" | xargs grep -l "zstd::libzstd_shared"); do
-            echo "Patching $cmake_file with direct library reference"
-            # Replace zstd::libzstd_shared with the actual library path
-            sed -i 's|target_link_libraries(.* zstd::libzstd_shared)|target_link_libraries(\1 '"${ZSTD_LIB_PATH}"')|g' "$cmake_file"
+          # If the second approach succeeds, attempt the build
+          if [ $? -eq 0 ]; then
+            echo "=== Second approach succeeded, attempting build ==="
+            make -j$(nproc) VERBOSE=1 || make VERBOSE=1
+          else
+            echo "=== Second approach failed, direct editing source files ==="
+            cd ..
+            rm -rf build
             
-            # Make sure include directories are also added
-            if grep -q "target_link_libraries" "$cmake_file"; then
-              # Extract target name from target_link_libraries
-              target=$(grep -o "target_link_libraries([^ ]*" "$cmake_file" | sed 's/target_link_libraries(//')
-              
-              if [ ! -z "$target" ] && ! grep -q "target_include_directories.*${target}.*${ZSTD_INCLUDE_PATH}" "$cmake_file"; then
-                # Add include directory directive after target_link_libraries line
-                sed -i "/target_link_libraries.*${target}/a target_include_directories(${target} PRIVATE ${ZSTD_INCLUDE_PATH})" "$cmake_file"
+            # Replace all references to zstd::libzstd_shared with the actual library path
+            for cmake_file in $(find . -name "CMakeLists.txt"); do
+              if grep -q "zstd" "$cmake_file"; then
+                echo "Updating zstd references in $cmake_file"
+                sed -i "s|zstd::libzstd_shared|${ZSTD_LIB_PATH}|g" "$cmake_file"
+                sed -i "s|zstd|${ZSTD_LIB_PATH}|g" "$cmake_file"
               fi
-            fi
-          done
-          
-          # Try building again with simpler configuration
-          mkdir -p build
-          cd build
-          LLVM_REQUESTED_VERSION=16 cmake .. \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_TESTING=OFF \
-            -DSTATIC_LINKING=ON \
-            -DENABLE_MAN=OFF
+            done
+            
+            # Final attempt
+            mkdir -p build
+            cd build
+            LLVM_REQUESTED_VERSION=16 cmake .. \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_TESTING=OFF \
+              -DSTATIC_LINKING=ON \
+              -DENABLE_MAN=OFF
+            
+            make -j$(nproc) VERBOSE=1 || make VERBOSE=1
+          fi
         fi
-
-        # If still failing, try the most drastic approach - direct file manipulation
-        if [ $? -ne 0 ]; then
-          echo "=== Third approach failed, trying final direct manipulation approach ==="
-          cd ..
-          rm -rf build
-          
-          # Directly edit source files to use the zstd library
-          echo "Direct modification of source files..."
-          
-          # Look for files that directly reference zstd::libzstd_shared and fix them
-          find . -type f -name "*.cpp" -o -name "*.h" | xargs grep -l "zstd::" | while read file; do
-            echo "Checking $file for zstd references"
-            # If there are function calls to zstd:: namespace, we need to add include
-            if grep -q "zstd::" "$file"; then
-              echo "Adding zstd include to $file"
-              sed -i '1i#include <zstd.h>' "$file"
-              # Remove namespace from function calls
-              sed -i 's/zstd:://g' "$file"
-            fi
-          done
-          
-          # Most direct approach - replace all zstd links with direct static linking
-          for cmake_file in $(find . -name "CMakeLists.txt"); do
-            if grep -q "zstd" "$cmake_file"; then
-              echo "Completely updating $cmake_file for direct zstd linking"
-              # Remove any find_package calls for zstd
-              sed -i '/find_package.*[Zz]std/d' "$cmake_file"
-              
-              # Update any target_link_libraries calls to use the direct path
-              sed -i 's|zstd::libzstd_shared|'"${ZSTD_LIB_PATH}"'|g' "$cmake_file"
-              sed -i 's|zstd|'"${ZSTD_LIB_PATH}"'|g' "$cmake_file"
-              
-              # Add zstd include directory to all targets in the file
-              targets=$(grep -o "add_\(library\|executable\) *([^ ]*" "$cmake_file" | cut -d'(' -f2)
-              for target in $targets; do
-                if [ ! -z "$target" ] && ! grep -q "target_include_directories.*${target}.*${ZSTD_INCLUDE_PATH}" "$cmake_file"; then
-                  echo "Adding include directories for target $target"
-                  echo "target_include_directories(${target} PRIVATE ${ZSTD_INCLUDE_PATH})" >> "$cmake_file"
-                fi
-              done
-            fi
-          done
-          
-          # Create bare minimum build
-          mkdir -p build
-          cd build
-          LLVM_REQUESTED_VERSION=16 cmake .. \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_TESTING=OFF \
-            -DSTATIC_LINKING=ON \
-            -DENABLE_MAN=OFF \
-            -DCMAKE_CXX_FLAGS="-I${ZSTD_INCLUDE_PATH}" \
-            -DCMAKE_EXE_LINKER_FLAGS="${ZSTD_LIB_PATH}" \
-            -DCMAKE_SHARED_LINKER_FLAGS="${ZSTD_LIB_PATH}"
-        fi
-
-        # Try build 
-        make -j$(nproc) VERBOSE=1 || make VERBOSE=1
 
         # Check if the binary was successfully built
         if [ -f "src/bpftrace" ]; then
@@ -443,11 +362,6 @@ jobs:
           echo "==== Build Error Information ===="
           find . -name "CMakeError.log" -exec cat {} \; || true
           find . -name "CMakeOutput.log" -exec cat {} \; || true
-          # Dump last 100 lines of make output to help diagnosis
-          if [ -f "make_output.log" ]; then
-            echo "Last 100 lines of make output:"
-            tail -n 100 make_output.log
-          fi
           exit 1
         fi
         EOF
