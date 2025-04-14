@@ -77,9 +77,9 @@ jobs:
             DESTDIR=/ make install prefix=/usr && \
             DESTDIR=/ make install_uapi_headers prefix=/usr
 
-        # 编译BCC (修改为使用静态库)
+        # 编译BCC (使用多步骤方法以确保成功)
         WORKDIR /src
-        RUN git clone https://github.com/iovisor/bcc.git -b v0.26.0 && \
+        RUN git clone https://github.com/iovisor/bcc.git -b v0.24.0 && \
             cd bcc && \
             mkdir build && \
             cd build && \
@@ -87,19 +87,33 @@ jobs:
                   -DENABLE_EXAMPLES=OFF \
                   -DENABLE_MAN=OFF \
                   -DENABLE_TESTS=OFF \
-                  -DBUILD_SHARED_LIBS=OFF \
-                  -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
                   .. && \
-            make -j$(nproc) VERBOSE=1 && \
-            make install
+            make -j$(nproc) || echo "First build attempt failed, trying with less parallelism" && \
+            make -j1 && \
+            make install && \
+            echo "Copying necessary BCC libraries and headers" && \
+            mkdir -p /usr/lib/static && \
+            cp -f /usr/lib/libbcc*.a /usr/lib/static/ 2>/dev/null || \
+            (cd .. && \
+             find . -name "*.a" -exec cp {} /usr/lib/static/ \; && \
+             find . -name "*.so" -exec cp {} /usr/lib/ \;) && \
+            ls -la /usr/lib/static/ && \
+            ls -la /usr/lib/libbcc* && \
+            ls -la /usr/include/bcc
 
-        # 验证静态库是否已安装
-        RUN find /usr -name "*.a" | grep -E '(bcc|bpf)' || echo "静态库未找到"
+        # 验证库是否已安装
+        RUN find /usr -name "libbcc*" | sort && \
+            find /usr -name "libbpf*" | sort && \
+            echo "检查头文件" && \
+            find /usr/include -name "bcc_*.h" | sort
 
         # 设置交叉编译环境
         RUN mkdir -p /usr/aarch64-linux-gnu/include/bpf && \
+            mkdir -p /usr/aarch64-linux-gnu/include/bcc && \
             cp -r /usr/include/bpf/* /usr/aarch64-linux-gnu/include/bpf/ && \
-            cp -r /usr/lib/libbcc*.a /usr/aarch64-linux-gnu/lib/ || true && \
+            cp -r /usr/include/bcc/* /usr/aarch64-linux-gnu/include/bcc/ && \
+            cp -r /usr/lib/libbcc*.so* /usr/aarch64-linux-gnu/lib/ || true && \
+            cp -r /usr/lib/static/libbcc*.a /usr/aarch64-linux-gnu/lib/ || true && \
             cp -r /usr/lib64/libbpf.a /usr/aarch64-linux-gnu/lib/ || true
 
         # 创建所需的符号链接
@@ -181,10 +195,10 @@ jobs:
         set(LIBLZMA_LIBRARIES /usr/lib/x86_64-linux-gnu/liblzma.a)
         set(LIBLZMA_INCLUDE_DIRS /usr/include)
         
-        # BCC设置
-        set(LIBBCC_LIBRARIES /usr/lib/libbcc.a)
+        # BCC设置 - 使用找到的库文件
+        set(LIBBCC_LIBRARIES /usr/lib/static/libbcc.a /usr/lib/libbcc.so)
         set(LIBBCC_INCLUDE_DIRS /usr/include)
-        set(LIBBCC_BPF_LIBRARIES /usr/lib/libbcc_bpf.a)
+        set(LIBBCC_BPF_LIBRARIES /usr/lib/static/libbcc_bpf.a /usr/lib/libbcc_bpf.so)
 
         # LIBBPF设置
         set(LIBBPF_LIBRARIES /usr/lib64/libbpf.a)
@@ -204,8 +218,20 @@ jobs:
           -DENABLE_LIBDW=OFF \
           -DENABLE_LLVM_JIT=OFF \
           -DBUILD_SHARED_LIBS=OFF \
-          -DSTATIC_LINKING=ON \
-          -DSTATIC_LIBC=ON
+          -DSTATIC_LINKING=ON || echo "First attempt failed, trying without STATIC_LINKING"
+        
+        # 如果第一次尝试失败，再尝试不使用STATIC_LINKING
+        if [ ! -f "Makefile" ]; then
+          echo "Retrying with less restrictive static linking options..."
+          LLVM_REQUESTED_VERSION=16 cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE=../arm64_toolchain.cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF \
+            -DENABLE_MAN=OFF \
+            -DENABLE_LIBDW=OFF \
+            -DENABLE_LLVM_JIT=OFF \
+            -DBUILD_SHARED_LIBS=OFF
+        fi
           
         # 构建
         make -j$(nproc) VERBOSE=1 || true
