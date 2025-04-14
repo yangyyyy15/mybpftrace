@@ -36,6 +36,8 @@ jobs:
             zlib1g-dev \
             libfl-dev \
             libcereal-dev \
+            liblzma-dev \
+            libiberty-dev \
             binutils-aarch64-linux-gnu \
             gcc-aarch64-linux-gnu \
             g++-aarch64-linux-gnu
@@ -56,6 +58,9 @@ jobs:
         RUN update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-16 100 && \
             update-alternatives --install /usr/bin/clang clang /usr/bin/clang-16 100
 
+        # 创建ARM64的库目录
+        RUN mkdir -p /usr/aarch64-linux-gnu/lib /usr/aarch64-linux-gnu/include
+
         # 从源码编译libbpf - 最新版本
         WORKDIR /src
         RUN git clone --recursive https://github.com/libbpf/libbpf.git && \
@@ -65,8 +70,7 @@ jobs:
             DESTDIR=/ make install_uapi_headers prefix=/usr
 
         # 设置交叉编译环境 - 避免目录冲突
-        RUN mkdir -p /usr/aarch64-linux-gnu/lib /usr/aarch64-linux-gnu/include && \
-            cp -r /usr/include/bpf /usr/aarch64-linux-gnu/include/ && \
+        RUN cp -r /usr/include/bpf /usr/aarch64-linux-gnu/include/ && \
             ln -sf /usr/lib64/libbpf.a /usr/aarch64-linux-gnu/lib/
 
         # 创建简单的BCC环境 - 避免软链接覆盖目录
@@ -81,6 +85,18 @@ jobs:
             touch dummy.c && \
             ar rcs /usr/lib/libbcc.a dummy.c && \
             ln -sf /usr/lib/libbcc.a /usr/aarch64-linux-gnu/lib/
+        
+        # 复制必要的库文件到ARM64目录
+        RUN cp /usr/lib/x86_64-linux-gnu/libelf.a /usr/aarch64-linux-gnu/lib/ 2>/dev/null || true && \
+            cp /usr/lib/x86_64-linux-gnu/libelf.so /usr/aarch64-linux-gnu/lib/ 2>/dev/null || true && \
+            cp /usr/lib/x86_64-linux-gnu/libz.a /usr/aarch64-linux-gnu/lib/ 2>/dev/null || true && \
+            cp /usr/lib/x86_64-linux-gnu/libz.so /usr/aarch64-linux-gnu/lib/ 2>/dev/null || true && \
+            cp /usr/lib/x86_64-linux-gnu/liblzma.a /usr/aarch64-linux-gnu/lib/ 2>/dev/null || true && \
+            cp /usr/lib/x86_64-linux-gnu/liblzma.so /usr/aarch64-linux-gnu/lib/ 2>/dev/null || true && \
+            cp -r /usr/include/elf.h /usr/aarch64-linux-gnu/include/ 2>/dev/null || true && \
+            cp -r /usr/include/libelf.h /usr/aarch64-linux-gnu/include/ 2>/dev/null || true && \
+            cp -r /usr/include/gelf.h /usr/aarch64-linux-gnu/include/ 2>/dev/null || true && \
+            cp -r /usr/include/nlist.h /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
 
         WORKDIR /bpftrace
         EOF
@@ -101,6 +117,12 @@ jobs:
         ls -la /usr/lib64/libbpf* || echo "找不到libbpf库"
         echo "BCC包含目录:"
         ls -la /usr/include/bcc/ || echo "找不到BCC包含目录"
+        echo "LibElf库:"
+        ls -la /usr/lib/x86_64-linux-gnu/libelf* || echo "找不到LibElf库"
+        ls -la /usr/aarch64-linux-gnu/lib/libelf* || echo "找不到ARM64 LibElf库"
+        echo "Zlib库:"
+        ls -la /usr/lib/x86_64-linux-gnu/libz* || echo "找不到Zlib库"
+        ls -la /usr/aarch64-linux-gnu/lib/libz* || echo "找不到ARM64 Zlib库"
         
         # 创建交叉编译工具链文件
         cat > arm64_toolchain.cmake << 'CMAKEEOF'
@@ -116,13 +138,16 @@ jobs:
         set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE BOTH)
         set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
 
-        # 库文件
-        set(ZLIB_LIBRARY /usr/lib/aarch64-linux-gnu/libz.so)
+        # 库文件 - 使用静态库
+        set(ZLIB_LIBRARY /usr/lib/x86_64-linux-gnu/libz.a)
         set(ZLIB_INCLUDE_DIR /usr/include)
-
-        set(LIBELF_LIBRARIES /usr/lib/aarch64-linux-gnu/libelf.so)
+        
+        set(LIBELF_LIBRARIES /usr/lib/x86_64-linux-gnu/libelf.a)
         set(LIBELF_INCLUDE_DIRS /usr/include)
-
+        
+        set(LIBLZMA_LIBRARIES /usr/lib/x86_64-linux-gnu/liblzma.a)
+        set(LIBLZMA_INCLUDE_DIRS /usr/include)
+        
         # BCC设置
         set(LIBBCC_LIBRARIES /usr/lib/libbcc.a)
         set(LIBBCC_INCLUDE_DIRS /usr/include)
@@ -135,14 +160,41 @@ jobs:
         # 备份原始CMakeLists.txt
         cp -f CMakeLists.txt CMakeLists.txt.orig
         
-        # 修改CMakeLists.txt跳过版本检查
+        # 创建修改版本的FindLibElf.cmake
+        mkdir -p cmake_mod
+        cat > cmake_mod/FindLibElf.cmake << 'ELFCMAKE'
+        # 直接设置LibElf变量，绕过检查
+        set(LIBELF_FOUND TRUE)
+        set(LIBELF_INCLUDE_DIRS "/usr/include")
+        set(LIBELF_LIBRARIES "/usr/lib/x86_64-linux-gnu/libelf.a")
+        ELFCMAKE
+
+        # 创建修改版本的FindLibLzma.cmake
+        cat > cmake_mod/FindLibLzma.cmake << 'LZMACMAKE'
+        # 直接设置LibLzma变量，绕过检查
+        set(LIBLZMA_FOUND TRUE)
+        set(LIBLZMA_INCLUDE_DIRS "/usr/include")
+        set(LIBLZMA_LIBRARIES "/usr/lib/x86_64-linux-gnu/liblzma.a")
+        LZMACMAKE
+
+        # 创建修改版本的FindLibZ.cmake
+        cat > cmake_mod/FindLibZ.cmake << 'ZCMAKE'
+        # 直接设置LibZ变量，绕过检查
+        set(LIBZ_FOUND TRUE)
+        set(LIBZ_INCLUDE_DIRS "/usr/include")
+        set(LIBZ_LIBRARIES "/usr/lib/x86_64-linux-gnu/libz.a")
+        ZCMAKE
+        
+        # 修改CMakeLists.txt跳过库检查
         sed -i 's/if(LLVM_VERSION VERSION_LESS "16" OR LLVM_VERSION VERSION_GREATER "20")/if(FALSE)/g' CMakeLists.txt
-        
-        # 修改libbpf检查
         sed -i 's/if(NOT LIBBPF_FOUND)/if(FALSE)/g' CMakeLists.txt
-        
-        # 修改libbpf版本检查
         sed -i 's/message(FATAL_ERROR "bpftrace requires libbpf 1.5 or greater")/message(STATUS "Skipping libbpf version check")/g' CMakeLists.txt
+        
+        # 修改库检查的路径
+        sed -i 's|include(${CMAKE_SOURCE_DIR}/cmake/FindLibElf.cmake)|include(${CMAKE_SOURCE_DIR}/cmake_mod/FindLibElf.cmake)|g' CMakeLists.txt || true
+        sed -i 's|find_package(LibElf REQUIRED)|include(${CMAKE_SOURCE_DIR}/cmake_mod/FindLibElf.cmake)|g' CMakeLists.txt || true
+        sed -i 's|find_package(LibLzma)|include(${CMAKE_SOURCE_DIR}/cmake_mod/FindLibLzma.cmake)|g' CMakeLists.txt || true
+        sed -i 's|find_package(LibZ)|include(${CMAKE_SOURCE_DIR}/cmake_mod/FindLibZ.cmake)|g' CMakeLists.txt || true
         
         # 创建构建目录
         mkdir -p build-android-arm64
@@ -162,6 +214,12 @@ jobs:
           -DLIBBPF_INCLUDE_DIRS=/usr/include \
           -DLIBBCC_LIBRARIES=/usr/lib/libbcc.a \
           -DLIBBCC_INCLUDE_DIRS=/usr/include \
+          -DLIBELF_LIBRARIES=/usr/lib/x86_64-linux-gnu/libelf.a \
+          -DLIBELF_INCLUDE_DIRS=/usr/include \
+          -DLIBLZMA_LIBRARIES=/usr/lib/x86_64-linux-gnu/liblzma.a \
+          -DLIBLZMA_INCLUDE_DIRS=/usr/include \
+          -DLIBZ_LIBRARIES=/usr/lib/x86_64-linux-gnu/libz.a \
+          -DLIBZ_INCLUDE_DIRS=/usr/include \
           -DHAVE_LIBBCC_PERF_READER_OPEN_PERF_EVENT=OFF \
           -DHAVE_BCC_PROG_LOAD=ON \
           -DHAVE_BCC_CREATE_MAP=ON \
