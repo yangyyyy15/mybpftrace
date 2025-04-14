@@ -56,7 +56,8 @@ jobs:
             libxml2-dev \
             libbz2-dev \
             pkg-config \
-            sed
+            sed \
+            libpcap-dev
 
         # Install LLVM 16
         RUN wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
@@ -90,24 +91,20 @@ jobs:
             find /usr/include -name "bpf*.h" | sort && \
             cat /usr/include/bpf/libbpf_version.h
 
-        # Get BCC headers (but not the library, since we'll use libbpf)
-        WORKDIR /src
-        RUN git clone https://github.com/iovisor/bcc.git -b v0.24.0 --depth 1 && \
-            mkdir -p /usr/include/bcc && \
-            cp -r /src/bcc/src/cc/api/* /usr/include/bcc/ || true && \
-            cp -r /src/bcc/src/cc/libbpf.h /usr/include/bcc/ || true && \
-            cp -r /src/bcc/src/cc/bcc_common.h /usr/include/bcc/ || true && \
-            cp -r /src/bcc/src/cc/bcc_exception.h /usr/include/bcc/ || true
-            
-        # Create a minimal dummy libbcc library to satisfy linker
-        WORKDIR /tmp/libbcc_dummy
-        RUN mkdir -p lib && \
-            echo "// Dummy libbcc functions" > dummy.c && \
-            gcc -c -o dummy.o dummy.c && \
-            ar rcs lib/libbcc.a dummy.o && \
-            mkdir -p /usr/lib/bcc && \
-            cp lib/libbcc.a /usr/lib/bcc/ && \
-            ln -s /usr/lib/bcc/libbcc.a /usr/lib/libbcc.a
+        # Get BCC (both headers and libraries)
+        WORKDIR /opt
+        RUN git clone https://github.com/iovisor/bcc.git -b v0.24.0 && \
+            mkdir -p bcc/build && \
+            cd bcc/build && \
+            cmake .. -DCMAKE_INSTALL_PREFIX=/usr \
+                     -DENABLE_EXAMPLES=OFF \
+                     -DENABLE_MAN=OFF \
+                     -DENABLE_TESTS=OFF \
+                     -DENABLE_TOOLS=OFF && \
+            make -j$(nproc) && \
+            make install && \
+            ls -la /usr/lib/libbcc* || true && \
+            ls -la /usr/include/bcc || true
 
         WORKDIR /bpftrace
         EOF
@@ -130,56 +127,50 @@ jobs:
         echo "libbpf library:"
         find /usr -name libbpf.a
         echo "libbcc library:"
-        find /usr -name libbcc.a
+        find /usr -name "libbcc*.a" || true
+        find /usr -name "libbcc*.so" || true
         echo "libbpf version:"
         cat /usr/include/bpf/libbpf_version.h
         echo "Architecture:"
         uname -m
 
-        # Patch the CMakeLists.txt to better handle our build
-        echo "Applying necessary patches to build system..."
+        # Create patched source directory
+        echo "Creating patched source directory..."
+        mkdir -p /bpftrace-patched
+        cp -r /bpftrace/* /bpftrace-patched/
+        cd /bpftrace-patched
 
-        # 1. Still make LibBcc optional but create dummy lib paths
-        if grep -q "find_package(LibBcc REQUIRED)" CMakeLists.txt; then
-          echo "Patching CMakeLists.txt to make LibBcc optional"
-          # Use | as delimiter instead of / to avoid conflicts with paths
-          sed -i 's|find_package(LibBcc REQUIRED)|find_package(LibBcc)\nif(NOT LIBBCC_FOUND)\n  set(LIBBCC_LIBRARIES "/usr/lib/libbcc.a")\n  set(LIBBCC_BPF_LIBRARIES "/usr/lib/libbcc.a")\n  set(LIBBCC_LOADER_LIBRARY_STATIC "/usr/lib/libbcc.a")\n  set(LIBBCC_INCLUDE_DIRS "/usr/include")\nendif()|' CMakeLists.txt
-        fi
-
-        # 2. Remove the libbpf version check
-        if grep -q "bpftrace requires libbpf .* or greater" CMakeLists.txt; then
-          echo "Removing libbpf version check"
-          sed -i 's|if(LIBBPF_FOUND AND LIBBPF_VERSION VERSION_LESS.*)|if(FALSE)|' CMakeLists.txt
-        fi
-
-        # 3. Fix zstd library issues - use static zstd instead of shared
+        # Patch src/CMakeLists.txt to fix zstd references
+        echo "Patching src/CMakeLists.txt for zstd..."
+        grep -r "zstd::libzstd_shared" src || true
+        
+        # Replace zstd::libzstd_shared with ZLIB::ZLIB
         if grep -q "zstd::libzstd_shared" src/CMakeLists.txt; then
-          echo "Fixing zstd library references"
-          sed -i 's|zstd::libzstd_shared|zstd::libzstd_static|g' src/CMakeLists.txt
-          sed -i 's|zstd::libzstd_shared|zstd::libzstd_static|g' src/ast/CMakeLists.txt
+            sed -i 's/zstd::libzstd_shared/ZLIB::ZLIB/g' src/CMakeLists.txt
         fi
-
-        # 4. Additional fix for zstd not using proper imported targets
-        echo "Checking FindZstd.cmake file"
-        if [ -f "cmake/FindZstd.cmake" ]; then
-          echo "Patching FindZstd.cmake"
-          sed -i 's|add_library(zstd::libzstd_shared UNKNOWN IMPORTED)|add_library(zstd::libzstd_shared STATIC IMPORTED)\nadd_library(zstd::libzstd_static STATIC IMPORTED)|' cmake/FindZstd.cmake
-          sed -i 's|set_target_properties(zstd::libzstd_shared|set_target_properties(zstd::libzstd_shared zstd::libzstd_static|' cmake/FindZstd.cmake
+        
+        if grep -q "zstd::libzstd_shared" src/ast/CMakeLists.txt; then
+            sed -i 's/zstd::libzstd_shared/ZLIB::ZLIB/g' src/ast/CMakeLists.txt
         fi
-
-        # 5. Create a simple patch file for more complex changes
-        cat > bcc_patch.txt << 'PATCH'
-        --- CMakeLists.txt.orig
-        +++ CMakeLists.txt
-        @@ -80,7 +80,14 @@
+        
+        # Add more comprehensive modifications to handle libbcc library paths
+        if grep -q "find_package(LibBcc REQUIRED)" CMakeLists.txt; then
+            echo "Modifying CMakeLists.txt for BCC libraries"
+            cat > patch.txt << 'EOL'
+        --- a/CMakeLists.txt
+        +++ b/CMakeLists.txt
+        @@ -80,7 +80,16 @@
          find_package(LibElf REQUIRED)
          find_package(ZLIB REQUIRED)
          
         -find_package(LibBcc REQUIRED)
         +find_package(LibBcc)
+        +
+        +# Handle case when BCC is not found
         +if(NOT LIBBCC_FOUND)
+        +  message(STATUS "Setting manual BCC variables")
         +  set(LIBBCC_LIBRARIES "/usr/lib/libbcc.a")
-        +  set(LIBBCC_BPF_LIBRARIES "/usr/lib/libbcc.a")
+        +  set(LIBBCC_BPF_LIBRARIES "/usr/lib/libbcc_bpf.a")
         +  set(LIBBCC_LOADER_LIBRARY_STATIC "/usr/lib/libbcc.a")
         +  set(LIBBCC_INCLUDE_DIRS "/usr/include")
         +endif()
@@ -187,33 +178,40 @@ jobs:
          find_package(LibBpf)
          
          option(HAVE_BFD_DISASM "Use libbfd disassembler instead of LLVM" OFF)
-        PATCH
-
-        # Apply the patch if the sed command failed
-        if ! grep -q "if(NOT LIBBCC_FOUND)" CMakeLists.txt; then
-          echo "Applying patch file for BCC setup"
-          patch -p0 < bcc_patch.txt || echo "Patch may have failed, continuing anyway"
+        EOL
+            patch -p1 < patch.txt || true
+        fi
+        
+        # Skip libbpf version check
+        if grep -q "bpftrace requires libbpf" CMakeLists.txt; then
+            echo "Removing libbpf version check"
+            sed -i 's/if(LIBBPF_FOUND AND LIBBPF_VERSION VERSION_LESS.*)/if(FALSE)/' CMakeLists.txt
         fi
 
         echo "Building static bpftrace..."
         mkdir -p build-android
         cd build-android
 
-        # Configure with CMake
+        # Configure with CMake - disable features that may cause issues
         LLVM_REQUESTED_VERSION=16 cmake .. \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_VERBOSE_MAKEFILE=ON \
           -DBUILD_TESTING=OFF \
           -DSTATIC_LINKING=ON \
-          -DUSE_LIBCC_POINTER_LOOKUP=OFF \
           -DALLOW_UNSAFE_PROBE=ON \
           -DBUILD_SHARED_LIBS=OFF \
           -DENABLE_MAN=OFF \
-          -DENABLE_LLVM_JIT=OFF \
-          -DLIBBCC_ATTACH_KPROBE_SIX_ARGS_SIGNATURE=OFF \
-          -DLIBBCC_ATTACH_UPROBE_SEVEN_ARGS_SIGNATURE=OFF \
-          -DBUILD_EXAMPLES=OFF
+          -DENABLE_LIBBLAZESYM=OFF \
+          -DCMAKE_SKIP_BUILD_RPATH=ON \
+          -DSKIP_BCC_DIRECT_EXPORT=ON \
+          -DHAVE_BCC_PROG_LOAD=OFF \
+          -DHAVE_BCC_CREATE_MAP=OFF
 
+        # Check cmake configurations
+        echo "CMake configuration summary:"
+        grep -r "LIBBCC_" CMakeCache.txt || true
+        grep -r "STATIC_LINKING" CMakeCache.txt || true
+        
         # Build - first try with multiple cores, fallback to single thread if issues
         make -j$(nproc) VERBOSE=1 || make VERBOSE=1
 
