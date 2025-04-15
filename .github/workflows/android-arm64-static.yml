@@ -144,17 +144,17 @@ jobs:
             
         # Create network function stubs for static linking
         RUN mkdir -p /tmp/network_stubs && cd /tmp/network_stubs && \
-            cat > network_stubs.c << 'EOF_STUBS' && \
-            #include <netdb.h>
-            #include <sys/socket.h>
-            
-            struct hostent *gethostbyname(const char *name) { return NULL; }
-            int gethostbyname_r(const char *name, struct hostent *ret, char *buf, size_t buflen, struct hostent **result, int *h_errnop) { return -1; }
-            struct netent *getnetbyname(const char *name) { return NULL; }
-            int getnetbyname_r(const char *name, struct netent *result, char *buffer, size_t buflen, struct netent **entry, int *errnop) { return -1; }
-            struct protoent *getprotobyname(const char *name) { return NULL; }
-            int getprotobyname_r(const char *name, struct protoent *result, char *buffer, size_t buflen, struct protoent **entry) { return -1; }
-            EOF_STUBS
+            cat > network_stubs.c << 'EOF_STUBS'
+#include <netdb.h>
+#include <sys/socket.h>
+
+struct hostent *gethostbyname(const char *name) { return NULL; }
+int gethostbyname_r(const char *name, struct hostent *ret, char *buf, size_t buflen, struct hostent **result, int *h_errnop) { return -1; }
+struct netent *getnetbyname(const char *name) { return NULL; }
+int getnetbyname_r(const char *name, struct netent *result, char *buffer, size_t buflen, struct netent **entry, int *errnop) { return -1; }
+struct protoent *getprotobyname(const char *name) { return NULL; }
+int getprotobyname_r(const char *name, struct protoent *result, char *buffer, size_t buflen, struct protoent **entry) { return -1; }
+EOF_STUBS
             musl-gcc -c network_stubs.c -o network_stubs.o && \
             ar rcs /usr/lib/libnetwork_stubs.a network_stubs.o
 
