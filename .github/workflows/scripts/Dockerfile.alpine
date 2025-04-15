@@ -68,12 +68,17 @@ RUN if [ ! -e /lib/ld-musl-x86_64.so.1 ] && [ -e /lib/libc.musl-x86_64.so.1 ]; t
     ln -s /lib/libc.musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1; \
 fi
 
-# Create stubs for missing LLVM components
+# Create stubs for missing LLVM components - including new stubs for gtest
 RUN mkdir -p /tmp/empty && cd /tmp/empty && \
     echo "void __llvm_stub() {}" > stub.c && \
     gcc -c stub.c -o stub.o && \
     mkdir -p /usr/lib/llvm17/lib && \
-    for lib in libLLVMTestingAnnotations.a libLLVMTestingSupport.a libLLVMFrontendOpenMP.a libLLVMFrontenddriver.a libLLVMFrontendOffloading.a libLLVMOrcJIT.a; do \
+    for lib in libLLVMTestingAnnotations.a libLLVMTestingSupport.a libLLVMFrontendOpenMP.a libLLVMFrontenddriver.a libLLVMFrontendOffloading.a libLLVMOrcJIT.a libllvm_gtest.a libllvm_gtest_main.a libclangdRemoteIndex.a libclangDaemon.a libclangDaemonTweaks.a libclangdMain.a; do \
+        echo "Creating stub for $lib"; \
+        ar rcs /usr/lib/llvm17/lib/$lib stub.o; \
+    done && \
+    # Additional stubs for libclang libraries
+    for lib in libclangBasic.a libclangAPINotes.a libclangLex.a libclangParse.a libclangAST.a libclangDynamicASTMatchers.a libclangASTMatchers.a libclangCrossTU.a libclangSema.a libclangCodeGen.a libclangAnalysis.a libclangAnalysisFlowSensitive.a libclangAnalysisFlowSensitiveModels.a; do \
         echo "Creating stub for $lib"; \
         ar rcs /usr/lib/llvm17/lib/$lib stub.o; \
     done && \
@@ -100,6 +105,22 @@ RUN mkdir -p /usr/local/share/cmake/Modules
 
 # Copy our custom FindLLVM.cmake module
 COPY custom-FindLLVM.cmake /usr/local/share/cmake/Modules/FindLLVM.cmake
+
+# Create a custom LLVMExports.cmake to override or patch problematic declarations
+RUN mkdir -p /usr/lib/llvm17/lib/cmake/llvm && \
+    echo "# Custom patch for LLVMExports.cmake to prevent errors with missing gtest libraries" > /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    echo "if (NOT TARGET llvm_gtest AND EXISTS \"/usr/lib/llvm17/lib/libllvm_gtest.a\")" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    echo "  add_library(llvm_gtest STATIC IMPORTED)" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    echo "  set_target_properties(llvm_gtest PROPERTIES IMPORTED_LOCATION \"/usr/lib/llvm17/lib/libllvm_gtest.a\")" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    echo "endif()" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    echo "if (NOT TARGET llvm_gtest_main AND EXISTS \"/usr/lib/llvm17/lib/libllvm_gtest_main.a\")" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    echo "  add_library(llvm_gtest_main STATIC IMPORTED)" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    echo "  set_target_properties(llvm_gtest_main PROPERTIES IMPORTED_LOCATION \"/usr/lib/llvm17/lib/libllvm_gtest_main.a\")" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    echo "endif()" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    # Patch the original LLVMExports.cmake to include our patch
+    if [ -f "/usr/lib/llvm17/lib/cmake/llvm/LLVMExports.cmake" ]; then \
+      echo "include(\${CMAKE_CURRENT_LIST_DIR}/LLVMTestPatch.cmake)" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMExports.cmake; \
+    fi
 
 # If bcc-dev doesn't provide all needed files, compile from source
 RUN if [ ! -f "/usr/include/bcc/bcc_version.h" ]; then \
