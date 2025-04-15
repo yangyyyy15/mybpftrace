@@ -66,7 +66,7 @@ jobs:
             && find /usr -name "libzstd.so*" \
             && find /usr -name "zstd.h"
 
-        # Install LLVM 16
+        # Install LLVM 16 with Polly support
         RUN wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
             echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-16 main" >> /etc/apt/sources.list.d/llvm.list && \
             apt-get update && \
@@ -76,10 +76,13 @@ jobs:
                 clang-16 \
                 libclang-16-dev \
                 libllvm16 \
+                libpolly-16-dev \
                 libz3-dev && \
             # Check installation
             ls -la /usr/bin/llvm-config-16 && \
-            /usr/bin/llvm-config-16 --version
+            /usr/bin/llvm-config-16 --version && \
+            # Check Polly installation
+            ls -la /usr/lib/llvm-16/lib/libPolly*.* || echo "Polly libraries not found in expected location"
 
         # Set LLVM 16 as default
         RUN update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-16 100 && \
@@ -135,6 +138,9 @@ jobs:
         find /usr/include -name "zstd*.h" || echo "zstd*.h not found"
         echo "libbpf version:"
         cat /usr/include/bpf/libbpf_version.h || echo "libbpf_version.h not found"
+        echo "Polly libraries:"
+        find /usr -name "libPolly*.a" || echo "libPolly*.a not found"
+        find /usr -name "libPolly*.so" || echo "libPolly*.so not found"
         echo "Architecture:"
         uname -m
 
@@ -149,6 +155,18 @@ jobs:
 
         echo "Using zstd library at: ${ZSTD_LIB_PATH}"
         echo "Using zstd include at: ${ZSTD_INCLUDE_PATH}"
+
+        # Check if Polly libraries are available
+        POLLY_LIB=$(find /usr -name "libPolly.a" -print -quit || true)
+        if [ -z "$POLLY_LIB" ]; then
+          echo "WARNING: libPolly.a not found, creating an empty one"
+          mkdir -p /usr/lib/llvm-16/lib
+          ar cr /usr/lib/llvm-16/lib/libPolly.a
+          echo "Created empty libPolly.a at /usr/lib/llvm-16/lib/libPolly.a"
+          POLLY_LIB="/usr/lib/llvm-16/lib/libPolly.a"
+        else
+          echo "Found Polly library at: ${POLLY_LIB}"
+        fi
 
         # ======= FIX C++ ISSUES =======
         echo "Fixing C++ compatibility issues..."
@@ -353,6 +371,22 @@ jobs:
         # Add C++17 compatibility fixes to the CMakeLists.txt
         sed -i 's/set(CMAKE_CXX_STANDARD 20)/set(CMAKE_CXX_STANDARD 17)/' CMakeLists.txt
 
+        # Fix Polly dependency issues in CMakeLists.txt
+        if grep -q "Polly" CMakeLists.txt; then
+          echo "Checking for Polly references in CMakeLists.txt..."
+          # If Polly is optional, make sure it's handled correctly
+          sed -i 's/find_package(Polly/find_package(Polly QUIET/g' CMakeLists.txt
+        fi
+
+        # Also check in src/CMakeLists.txt
+        if [ -f "src/CMakeLists.txt" ]; then
+          echo "Checking for Polly references in src/CMakeLists.txt..."
+          if grep -q "Polly" src/CMakeLists.txt; then
+            # Make it optional or provide a fallback
+            sed -i 's/target_link_libraries.*Polly/# &/g' src/CMakeLists.txt
+          fi
+        fi
+
         # Create build directory
         mkdir -p build
         cd build
@@ -374,7 +408,46 @@ jobs:
 
         # Build the project
         echo "=== Building bpftrace ==="
-        make -j$(nproc) || make
+        make -j$(nproc) || make VERBOSE=1
+
+        # If build fails, try to fix specific Polly issues and rebuild
+        if [ ! -f "src/bpftrace" ]; then
+          echo "Initial build failed, attempting with more aggressive fixes..."
+          
+          # Force create link to Polly library if needed
+          if [ -f "/usr/lib/llvm-16/lib/libPolly.a" ]; then
+            echo "Polly library exists but build failed. Trying other fixes..."
+          else
+            echo "Creating empty libPolly.a in /usr/lib/llvm-16/lib..."
+            mkdir -p /usr/lib/llvm-16/lib
+            ar cr /usr/lib/llvm-16/lib/libPolly.a
+          fi
+          
+          # Try editing link.txt to remove Polly dependency
+          find . -name "link.txt" | xargs sed -i 's| -lPolly||g'
+          
+          # Try rebuilding with better Polly handling
+          cd ..
+          rm -rf build
+          mkdir -p build
+          cd build
+          
+          LLVM_REQUESTED_VERSION=16 cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_VERBOSE_MAKEFILE=ON \
+            -DBUILD_TESTING=OFF \
+            -DSTATIC_LINKING=ON \
+            -DENABLE_MAN=OFF \
+            -DWITH_LIBPOLLY=OFF \
+            -DZSTD_LIBRARY=${ZSTD_LIB_PATH} \
+            -DZSTD_INCLUDE_DIR=${ZSTD_INCLUDE_PATH} \
+            -DCMAKE_MODULE_PATH=/bpftrace-build/cmake/custom:/bpftrace-build/cmake/modules \
+            -DCMAKE_PREFIX_PATH=/bpftrace-build/cmake/custom \
+            -DCMAKE_CXX_STANDARD=17 \
+            -DCMAKE_CXX_FLAGS="-Wno-error=missing-field-initializers -DNO_POLLY"
+          
+          make -j$(nproc) || make VERBOSE=1
+        fi
 
         # Check if the binary was successfully built
         if [ -f "src/bpftrace" ]; then
@@ -398,6 +471,8 @@ jobs:
           echo "==== Build Error Information ===="
           find . -name "CMakeError.log" -exec cat {} \; || true
           find . -name "CMakeOutput.log" -exec cat {} \; || true
+          # Try to get more error details
+          find . -name "*.log" -exec grep -l "error:" {} \; | xargs cat 2>/dev/null || true
           exit 1
         fi
         EOF
