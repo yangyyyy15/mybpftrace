@@ -681,7 +681,7 @@ jobs:
         fi
 
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v2
       with:
         name: bpftrace-android-arm64-static
         path: artifacts/bpftrace-android-arm64-static.tar.gz
