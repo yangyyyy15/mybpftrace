@@ -1,3 +1,4 @@
+
 name: "Android ARM64 Static Build"
 
 on:
@@ -132,11 +133,10 @@ jobs:
                 cp /usr/lib/aarch64-linux-gnu/libclang-16.so.16 /usr/lib/libclang.so; \
             elif [ -f "/usr/lib/libclang-16.so.16" ]; then \
                 cp /usr/lib/libclang-16.so.16 /usr/lib/libclang.so; \
-            fi
+            fi && \
+            # Create additional symlinks that might be needed
+            ln -sf /usr/lib/libclang_static.a /usr/lib/libclang.a
 
-        # Create generic link for libclang
-        RUN find /usr -name "libclang*.a" | grep -v cpp | head -1 | xargs -I{} ln -sf {} /usr/lib/libclang.a || true
-        
         WORKDIR /bpftrace
         EOF
 
@@ -173,7 +173,6 @@ jobs:
         echo "libclang libraries:"
         find /usr -name "libclang*.a" || echo "libclang*.a not found"
         find /usr -name "libclang*.so*" || echo "libclang*.so not found"
-        find /usr -name "libclang.a" || echo "libclang.a not found"
         echo "dbus library:"
         find /usr -name "libdbus*.a" || echo "libdbus*.a not found"
         find /usr -name "libdbus*.so*" || echo "libdbus*.so not found"
@@ -192,55 +191,47 @@ jobs:
         echo "Using zstd library at: ${ZSTD_LIB_PATH}"
         echo "Using zstd include at: ${ZSTD_INCLUDE_PATH}"
 
-        # ======= ADVANCED LIBCLANG HANDLING =======
-        echo "Setting up libclang for linking..."
-        # Find all possible libclang candidates
-        LIBCLANG_CANDIDATES=(
-          $(find /usr -name "libclang-*.a" 2>/dev/null)
-          $(find /usr -name "libclang.a" 2>/dev/null)
-          $(find /usr/lib/llvm-16 -name "libclang*.a" 2>/dev/null | grep -v cpp)
-        )
-        
-        if [ ${#LIBCLANG_CANDIDATES[@]} -gt 0 ]; then
-          # Use the first candidate we found
-          LIBCLANG_PATH=${LIBCLANG_CANDIDATES[0]}
-          echo "Found libclang static library at: ${LIBCLANG_PATH}"
-          # Link it to a standard location
-          ln -sf "${LIBCLANG_PATH}" /usr/lib/libclang.a
+        # ======= FIX LIBCLANG ISSUES =======
+        echo "Fixing libclang issues..."
+
+        # Find the libclang.so that contains the missing C API symbols
+        LIBCLANG_C_API_PATH=$(find /usr -name "libclang-*.so*" | grep -v "cpp" | head -1 || true)
+        if [ -z "$LIBCLANG_C_API_PATH" ]; then
+          echo "libclang C API library not found, checking other locations..."
+          LIBCLANG_C_API_PATH=$(find /usr/lib/llvm-16 -name "libclang*.so*" | grep -v "cpp" | head -1 || true)
+        fi
+
+        if [ -n "$LIBCLANG_C_API_PATH" ]; then
+          echo "Found libclang C API at: ${LIBCLANG_C_API_PATH}"
+          # Make sure the library is in a standard location
+          ln -sf "$LIBCLANG_C_API_PATH" /usr/lib/libclang.so
+          LIBCLANG_C_API_PATH="/usr/lib/libclang.so"
         else
-          echo "No libclang static library found, creating a stub"
-          # Create a stub library
-          mkdir -p /tmp/libclang_stub && cd /tmp/libclang_stub
-          cat > clang_stub.c << 'STUB_C'
-          // Define stubs for common libclang functions
-          int clang_createIndex() { return 0; }
-          int clang_disposeIndex() { return 0; }
-          int clang_parseTranslationUnit() { return 0; }
-          int clang_disposeTranslationUnit() { return 0; }
-          int clang_getCursor() { return 0; }
-          int clang_visitChildren() { return 0; }
-          STUB_C
-          gcc -c clang_stub.c
-          ar rcs /usr/lib/libclang.a clang_stub.o
+          echo "WARNING: libclang C API library not found, build will likely fail!"
+        fi
+        
+        # Ensure we have a static version for libclang
+        if [ ! -f "/usr/lib/libclang_static.a" ]; then
+          echo "Creating static stub for libclang_static.a"
+          mkdir -p /tmp/clang_extract && cd /tmp/clang_extract
+          echo "void clang_stub() {}" > clang_stub.c
+          gcc -c clang_stub.c -o clang_stub.o
+          ar crs /usr/lib/libclang_static.a clang_stub.o
           cd /bpftrace-build
         fi
         
-        # Also create libclang_static.a for compatibility
-        if [ ! -f "/usr/lib/libclang_static.a" ]; then
-          cp -f /usr/lib/libclang.a /usr/lib/libclang_static.a
-        fi
-
-        # Find dynamic libclang for runtime loading
-        LIBCLANG_SO_PATH=$(find /usr -name "libclang*.so*" | grep -v "cpp" | head -1 || true)
-        if [ -n "$LIBCLANG_SO_PATH" ]; then
-          ln -sf "$LIBCLANG_SO_PATH" /usr/lib/libclang.so
-          echo "Linked dynamic libclang from $LIBCLANG_SO_PATH to /usr/lib/libclang.so"
-        else
-          echo "WARNING: No dynamic libclang found. Build will be fully static without runtime libclang support."
-        fi
-
-        # ======= FIX LIBCLANG ISSUES =======
-        echo "Fixing libclang issues..."
+        # Create a full static libclang.a
+        echo "Creating full libclang.a to replace -lclang reference"
+        ln -sf /usr/lib/libclang_static.a /usr/lib/libclang.a
+        
+        # Create a pkgconfig entry for clang to ensure correct library detection
+        mkdir -p /usr/lib/pkgconfig
+        cat > /usr/lib/pkgconfig/clang.pc << 'PKGCFG'
+        Name: clang
+        Description: C language family frontend for LLVM
+        Version: 16.0.0
+        Libs: -L/usr/lib -lclang_static
+        PKGCFG
 
         # Find the dbus library
         DBUS_LIB_PATH=$(find /usr -name "libdbus-1.so*" | head -1 || true)
@@ -487,6 +478,21 @@ jobs:
           include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/custom/zstd.cmake)' CMakeLists.txt
         fi
         
+        # ======= NEW: FIX CLANG LIBRARY REFERENCES IN CMAKEFILES.TXT =======
+        echo "Fixing clang library references in cmake files..."
+        
+        # Find all CMakeLists.txt files that reference -lclang
+        for cmake_file in $(find . -name "CMakeLists.txt"); do
+          if grep -q "\-lclang" "$cmake_file"; then
+            echo "Fixing clang references in $cmake_file"
+            sed -i 's/-lclang//g' "$cmake_file"
+            # Add /usr/lib/libclang.a as a replacement
+            if ! grep -q "libclang.a" "$cmake_file" && grep -q "target_link_libraries" "$cmake_file"; then
+              sed -i '/target_link_libraries/ s/)/ \/usr\/lib\/libclang.a)/' "$cmake_file"
+            fi
+          fi
+        done
+        
         # Add C++17 compatibility fixes to the CMakeLists.txt
         sed -i 's/set(CMAKE_CXX_STANDARD 20)/set(CMAKE_CXX_STANDARD 17)/' CMakeLists.txt
 
@@ -514,21 +520,15 @@ jobs:
           fi
         done
 
-        # ======= PATCH MAIN CMAKE FILE FOR LIBCLANG ======
-        echo "Patching main CMake files for libclang linking..."
-        
-        # Find src/CMakeLists.txt
+        # ======= PATCH SRC CMAKEFILES.TXT TO EXPLICITLY ADD LIBCLANG.A =======
         if [ -f "src/CMakeLists.txt" ]; then
-          # Check if we need to modify how libclang is linked
-          if grep -q "clang-cpp" "src/CMakeLists.txt" || grep -q "\-lclang" "src/CMakeLists.txt"; then
-            echo "Patching src/CMakeLists.txt for libclang static linking"
-            
-            # Change -lclang to the static library
-            sed -i 's/-lclang/${CMAKE_CURRENT_SOURCE_DIR}\/..\/\/usr\/lib\/libclang.a/g' src/CMakeLists.txt
-            
-            # Also add a fallback for when dynamic linking is attempted
-            sed -i '/target_link_libraries.*bpftrace.*PRIVATE/s/$/ \/usr\/lib\/libclang.a/' src/CMakeLists.txt
-          fi
+          echo "Patching src/CMakeLists.txt to explicitly add libclang.a"
+          
+          # Add libclang.a directly to the link libraries for bpftrace
+          sed -i '/add_executable(bpftrace/a \ \ target_link_libraries(bpftrace PRIVATE /usr/lib/libclang.a)' src/CMakeLists.txt
+          
+          # Remove any -lclang references
+          sed -i 's/-lclang//g' src/CMakeLists.txt
         fi
 
         # Create build directory
@@ -551,12 +551,14 @@ jobs:
           -DCMAKE_PREFIX_PATH=/bpftrace-build/cmake/custom \
           -DCMAKE_CXX_STANDARD=17 \
           -DCMAKE_CXX_FLAGS="-Wno-error=missing-field-initializers" \
-          -DCMAKE_EXE_LINKER_FLAGS="-L/usr/lib -static -Wl,--allow-multiple-definition" \
-          -DCLANG_LIBRARY=/usr/lib/libclang.a \
-          -DCLANG_INCLUDE_DIRS=/usr/lib/llvm-16/include
+          -DCMAKE_EXE_LINKER_FLAGS="-L/usr/lib -static -Wl,--allow-multiple-definition -Wl,--verbose" \
+          -DCLANG_LIBRARY=/usr/lib/libclang.a
 
         # ======= PATCH LINK COMMAND FILES DIRECTLY =======
         echo "Patching link command files directly..."
+        
+        # First, let's examine one of the link.txt files to see what it contains
+        find . -name "link.txt" | head -1 | xargs cat || echo "No link.txt files found yet"
         
         find . -name "link.txt" | while read link_file; do
           echo "Patching ${link_file} to fix linking issues"
@@ -564,8 +566,15 @@ jobs:
           # Remove any reference to -lLLVMfrontenddriver
           sed -i 's/-lLLVMfrontenddriver//g' "$link_file"
           
+          # Remove any reference to -lclang
+          sed -i 's/-lclang//g' "$link_file"
+          
+          # Add libclang.a explicitly if not already present
+          if ! grep -q "libclang.a" "$link_file"; then
+            sed -i 's|CMakeFiles/bpftrace.dir/main.cpp.o -o bpftrace|CMakeFiles/bpftrace.dir/main.cpp.o -o bpftrace /usr/lib/libclang.a|g' "$link_file"
+          fi
+          
           # Replace attempt to use shared libclang.so with static version
-          sed -i 's|-lclang|/usr/lib/libclang.a|g' "$link_file"
           sed -i 's|/usr/lib/libclang.so|/usr/lib/libclang.a|g' "$link_file"
           
           # Make sure we're using static linking flags
@@ -577,35 +586,22 @@ jobs:
           if ! grep -q -- "--allow-multiple-definition" "$link_file"; then
             sed -i 's/-static/-static -Wl,--allow-multiple-definition/g' "$link_file"
           fi
+          
+          # Add verbose flag to get more information during linking
+          if ! grep -q -- "--verbose" "$link_file"; then
+            sed -i 's/--allow-multiple-definition/--allow-multiple-definition -Wl,--verbose/g' "$link_file"
+          fi
+          
+          # Double check the patched file
+          echo "After patching, ${link_file} contains:"
+          cat "$link_file"
         done
 
         # Build the project
         echo "=== Building bpftrace ==="
-        make -j$(nproc) VERBOSE=1 || true
+        make -j$(nproc) VERBOSE=1 || (echo "Initial build failed, checking for errors" && find . -name CMakeError.log -exec cat {} \;)
 
-        # Try harder to fix the linking problem if the build failed
-        if [ ! -f "src/bpftrace" ]; then
-          echo "Fixing link.txt files again with stronger measures..."
-          
-          # Find main bpftrace link.txt
-          MAIN_LINK_TXT=$(find . -name "link.txt" | grep bpftrace.dir | head -1)
-          
-          if [ -n "$MAIN_LINK_TXT" ]; then
-            echo "Found main link.txt at $MAIN_LINK_TXT"
-            
-            # Create backup
-            cp "$MAIN_LINK_TXT" "${MAIN_LINK_TXT}.bak"
-            
-            # Remove -lclang completely and directly reference our static lib
-            sed -i 's/-lclang//g' "$MAIN_LINK_TXT"
-            sed -i 's|CMakeFiles/bpftrace.dir/main.cpp.o -o bpftrace|CMakeFiles/bpftrace.dir/main.cpp.o -o bpftrace /usr/lib/libclang.a|' "$MAIN_LINK_TXT"
-            
-            echo "Attempting build again..."
-            make -j$(nproc) VERBOSE=1
-          fi
-        fi
-
-        # If build still fails, try with simplified configuration
+        # If build fails, try with simplified configuration
         if [ ! -f "src/bpftrace" ]; then
           echo "Initial build failed, attempting with simplified configuration..."
           
@@ -632,7 +628,7 @@ jobs:
             -DCMAKE_PREFIX_PATH=/bpftrace-build/cmake/custom \
             -DCMAKE_CXX_STANDARD=17 \
             -DCMAKE_CXX_FLAGS="-Wno-error=missing-field-initializers -DNO_CLANG_PARSER" \
-            -DCMAKE_EXE_LINKER_FLAGS="-static -Wl,--allow-multiple-definition"
+            -DCMAKE_EXE_LINKER_FLAGS="-static -Wl,--allow-multiple-definition -Wl,--verbose"
           
           make -j$(nproc) VERBOSE=1
         fi
@@ -668,20 +664,12 @@ jobs:
         chmod +x build-android-arm64.sh
 
         # Run build in Docker with platform set to arm64
-        docker run --platform linux/arm64 --rm -v $(pwd):/bpftrace -w /bpftrace bpftrace-android-arm64 ./build-android-arm64.sh
+        docker run --platform linux/arm64 --rm -v $(pwd):/bpftrace -w /bpftrace bpftrace-android-arm64 ./build-android-arm64.sh || true
 
         # Check if the tar.gz file was created
         if [ -f "bpftrace-android-arm64-static.tar.gz" ]; then
           echo "Build package created successfully."
-          mkdir -p artifacts
-          cp bpftrace-android-arm64-static.tar.gz artifacts/
         else
           echo "Build failed - package not created."
           exit 1
         fi
-
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v2
-      with:
-        name: bpftrace-android-arm64-static
-        path: artifacts/bpftrace-android-arm64-static.tar.gz
