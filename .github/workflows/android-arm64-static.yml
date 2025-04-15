@@ -549,7 +549,8 @@ EOF
           -DCMAKE_PREFIX_PATH=/bpftrace-build/cmake/custom \
           -DCMAKE_CXX_STANDARD=17 \
           -DCMAKE_CXX_FLAGS="-Wno-error=missing-field-initializers" \
-          -DCMAKE_EXE_LINKER_FLAGS="-L/usr/lib -static -Wl,--allow-multiple-definition"
+          -DCMAKE_EXE_LINKER_FLAGS="-L/usr/lib -static -Wl,--allow-multiple-definition" \
+          -DCLANG_LIBRARIES="/usr/lib/libclang_static.a"
 
         # ======= PATCH LINK COMMAND FILES DIRECTLY =======
         echo "Patching link command files directly..."
