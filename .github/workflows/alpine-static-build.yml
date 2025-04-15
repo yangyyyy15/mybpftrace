@@ -31,6 +31,21 @@ jobs:
         # Get number of CPU cores for parallel build
         NPROC=$(nproc)
 
+        # Display BCC version and paths
+        echo "BCC information:"
+        find /usr -name bcc_version.h || echo "bcc_version.h not found"
+        find /usr -name libbcc.a || echo "libbcc.a not found"
+        find /usr -name libbcc.so || echo "libbcc.so not found"
+
+        # If BCC was built from source, create symlinks if needed
+        if [ ! -f "/usr/lib/libbcc.a" ] && [ -f "/usr/lib/x86_64-linux-gnu/libbcc.a" ]; then
+            ln -s /usr/lib/x86_64-linux-gnu/libbcc.a /usr/lib/libbcc.a
+        fi
+
+        if [ ! -f "/usr/lib/libbcc_bpf.a" ] && [ -f "/usr/lib/x86_64-linux-gnu/libbcc_bpf.a" ]; then
+            ln -s /usr/lib/x86_64-linux-gnu/libbcc_bpf.a /usr/lib/libbcc_bpf.a
+        fi
+
         # Create a build directory
         mkdir -p build
 
@@ -42,7 +57,9 @@ jobs:
           -DBUILD_TESTING=OFF \
           -DSTATIC_LINKING=ON \
           -DENABLE_MAN=OFF \
-          -DUSE_SYSTEM_BPF_BCC=ON
+          -DUSE_SYSTEM_BPF_BCC=ON \
+          -DLIBBCC_INCLUDE_DIRS=/usr/include \
+          -DLIBBCC_LIBRARIES=/usr/lib/libbcc.a
 
         # Build bpftrace
         make -j${NPROC}
@@ -88,12 +105,18 @@ jobs:
         # Dockerfile for building static bpftrace with musl libc
         FROM alpine:3.19
 
+        # Add edge testing repository for some packages
+        RUN echo "https://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/apk/repositories
+
         RUN apk add --update \
           asciidoctor \
           argp-standalone \
           bash \
           binutils-dev \
           bison \
+          bpftrace \
+          bcc-dev \
+          bcc-static \
           bzip2-dev \
           bzip2-static \
           build-base \
@@ -144,6 +167,25 @@ jobs:
             ln -s /lib/libc.musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1; \
         fi
 
+        # If bcc-dev doesn't provide all needed files, compile from source
+        RUN if [ ! -f "/usr/include/bcc/bcc_version.h" ]; then \
+            apk add --no-cache cmake git python3 llvm17-dev clang17-dev flex-dev bison \
+                               build-base linux-headers elfutils-dev python3-dev && \
+            git clone https://github.com/iovisor/bcc.git /tmp/bcc && \
+            cd /tmp/bcc && \
+            git checkout v0.28.0 && \
+            mkdir build && \
+            cd build && \
+            cmake -DCMAKE_INSTALL_PREFIX=/usr \
+                  -DENABLE_LLVM_SHARED=0 \
+                  -DCMAKE_C_COMPILER=/usr/bin/clang \
+                  -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+                  .. && \
+            make -j$(nproc) && \
+            make install && \
+            cd / && rm -rf /tmp/bcc; \
+        fi
+
         # Create a build script that will be executed in the container
         COPY build-alpine.sh /build-alpine.sh
         RUN chmod +x /build-alpine.sh
@@ -151,6 +193,7 @@ jobs:
         WORKDIR /bpftrace
         ENTRYPOINT ["/build-alpine.sh"]
         EOF
+
 
     - name: Build Docker image for ARM64 architecture
       run: |
