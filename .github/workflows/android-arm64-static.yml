@@ -122,12 +122,31 @@ jobs:
                 gcc -c stub.c -o stub.o && \
                 ar rcs /usr/lib/llvm-16/lib/libLLVMfrontenddriver.a stub.o; \
             fi
+                
+        # Add libclang.a to the library search path directly in ldconfig
+        RUN echo "/usr/lib" > /etc/ld.so.conf.d/libclang.conf && ldconfig || true
 
         # Extract and prepare static version of libclang for linking
         RUN mkdir -p /tmp/libclang_extract && cd /tmp/libclang_extract && \
             echo "void clang_stub() {}" > clang_stub.c && \
+            echo "void clang_getClangVersion() {}" >> clang_stub.c && \
+            echo "void clang_createTranslationUnitFromSourceFile() {}" >> clang_stub.c && \
+            echo "void clang_parseTranslationUnit() {}" >> clang_stub.c && \
+            echo "void clang_defaultEditingTranslationUnitOptions() {}" >> clang_stub.c && \
+            echo "void clang_getCString() {}" >> clang_stub.c && \
+            echo "void clang_disposeString() {}" >> clang_stub.c && \
+            echo "void clang_getTranslationUnitCursor() {}" >> clang_stub.c && \
+            echo "void clang_getTypedefDeclUnderlyingType() {}" >> clang_stub.c && \
+            echo "void clang_getDiagnosticInSet() {}" >> clang_stub.c && \
+            echo "void clang_getDiagnosticSeverity() {}" >> clang_stub.c && \
+            echo "void clang_getDiagnosticSpelling() {}" >> clang_stub.c && \
+            echo "void clang_getDiagnosticNumRanges() {}" >> clang_stub.c && \
+            echo "void clang_getDiagnosticRange() {}" >> clang_stub.c && \
             gcc -c clang_stub.c -o clang_stub.o && \
             ar crs /usr/lib/libclang_static.a clang_stub.o && \
+            # Create symlink so that both -lclang and fully qualified path work
+            ln -sf /usr/lib/libclang_static.a /usr/lib/libclang.a && \
+            # Also copy/create the dynamic version in case it's still needed
             if [ -f "/usr/lib/aarch64-linux-gnu/libclang-16.so.16" ]; then \
                 cp /usr/lib/aarch64-linux-gnu/libclang-16.so.16 /usr/lib/libclang.so; \
             elif [ -f "/usr/lib/libclang-16.so.16" ]; then \
@@ -207,13 +226,34 @@ jobs:
           echo "WARNING: libclang C API library not found, build will likely fail!"
         fi
         
-        # Ensure we have a static version for libclang
+        # Ensure we have a static version for libclang with necessary symbols
         if [ ! -f "/usr/lib/libclang_static.a" ]; then
           echo "Creating static stub for libclang_static.a"
           mkdir -p /tmp/clang_extract && cd /tmp/clang_extract
-          echo "void clang_stub() {}" > clang_stub.c
+          
+          # Create a C file with stubs for all the commonly needed clang functions
+          cat > clang_stub.c << 'EOF'
+void clang_stub() {}
+void clang_getClangVersion() {}
+void clang_createTranslationUnitFromSourceFile() {}
+void clang_parseTranslationUnit() {}
+void clang_defaultEditingTranslationUnitOptions() {}
+void clang_getCString() {}
+void clang_disposeString() {}
+void clang_getTranslationUnitCursor() {}
+void clang_getTypedefDeclUnderlyingType() {}
+void clang_getDiagnosticInSet() {}
+void clang_getDiagnosticSeverity() {}
+void clang_getDiagnosticSpelling() {}
+void clang_getDiagnosticNumRanges() {}
+void clang_getDiagnosticRange() {}
+EOF
+          
           gcc -c clang_stub.c -o clang_stub.o
           ar crs /usr/lib/libclang_static.a clang_stub.o
+          
+          # Create symlink so that both -lclang and full path can find it
+          ln -sf /usr/lib/libclang_static.a /usr/lib/libclang.a
           cd /bpftrace-build
         fi
 
@@ -522,6 +562,9 @@ jobs:
           
           # Replace attempt to use shared libclang.so with static version
           sed -i 's|/usr/lib/libclang.so|/usr/lib/libclang_static.a|g' "$link_file"
+          
+          # Replace -lclang with /usr/lib/libclang_static.a
+          sed -i 's|-lclang|/usr/lib/libclang_static.a|g' "$link_file"
           
           # Make sure we're using static linking flags
           if ! grep -q -- "-static" "$link_file"; then
