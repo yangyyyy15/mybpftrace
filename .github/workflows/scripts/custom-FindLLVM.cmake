@@ -49,5 +49,20 @@ else()
   )
 endif()
 
+# Define targets for test frameworks if needed
+if(NOT TARGET llvm_gtest AND EXISTS "${LLVM_LIBRARY_DIRS}/libllvm_gtest.a")
+  add_library(llvm_gtest STATIC IMPORTED)
+  set_target_properties(llvm_gtest PROPERTIES 
+    IMPORTED_LOCATION "${LLVM_LIBRARY_DIRS}/libllvm_gtest.a"
+  )
+endif()
+
+if(NOT TARGET llvm_gtest_main AND EXISTS "${LLVM_LIBRARY_DIRS}/libllvm_gtest_main.a")
+  add_library(llvm_gtest_main STATIC IMPORTED)
+  set_target_properties(llvm_gtest_main PROPERTIES 
+    IMPORTED_LOCATION "${LLVM_LIBRARY_DIRS}/libllvm_gtest_main.a"
+  )
+endif()
+
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(LLVM DEFAULT_MSG LLVM_FOUND)
