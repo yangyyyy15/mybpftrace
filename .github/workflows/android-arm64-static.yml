@@ -141,10 +141,10 @@ jobs:
             fi && \
             # Create additional symlinks that might be needed
             ln -sf /usr/lib/libclang_static.a /usr/lib/libclang.a
-            
+
         # Create network function stubs for static linking
         RUN mkdir -p /tmp/network_stubs && cd /tmp/network_stubs && \
-            cat > network_stubs.c << 'EOF_STUBS'
+            cat > network_stubs.c << 'EOF_NETWORK'
 #include <netdb.h>
 #include <sys/socket.h>
 
@@ -154,7 +154,8 @@ struct netent *getnetbyname(const char *name) { return NULL; }
 int getnetbyname_r(const char *name, struct netent *result, char *buffer, size_t buflen, struct netent **entry, int *errnop) { return -1; }
 struct protoent *getprotobyname(const char *name) { return NULL; }
 int getprotobyname_r(const char *name, struct protoent *result, char *buffer, size_t buflen, struct protoent **entry) { return -1; }
-EOF_STUBS
+EOF_NETWORK
+        RUN cd /tmp/network_stubs && \
             musl-gcc -c network_stubs.c -o network_stubs.o && \
             ar rcs /usr/lib/libnetwork_stubs.a network_stubs.o
 
@@ -199,6 +200,8 @@ EOF_STUBS
         find /usr -name "libdbus*.so*" || echo "libdbus*.so not found"
         echo "Architecture:"
         uname -m
+        echo "Stub library for network functions:"
+        find /usr -name "libnetwork_stubs.a" || echo "libnetwork_stubs.a not found"
 
         # Create a working directory
         mkdir -p /bpftrace-build
@@ -680,16 +683,16 @@ EOF_STUBS
           echo "Build failed - creating minimal stub bpftrace"
           mkdir -p src
           cat > src/stub_bpftrace.c << 'STUB'
-          #include <stdio.h>
-          
-          int main(int argc, char *argv[]) {
-              printf("Minimal bpftrace stub (placeholder binary)\n");
-              if (argc > 1) {
-                  printf("Script: %s cannot be run in this minimal build.\n", argv[1]);
-              }
-              return 0;
-          }
-          STUB
+        #include <stdio.h>
+        
+        int main(int argc, char *argv[]) {
+            printf("Minimal bpftrace stub (placeholder binary)\n");
+            if (argc > 1) {
+                printf("Script: %s cannot be run in this minimal build.\n", argv[1]);
+            }
+            return 0;
+        }
+        STUB
           
           musl-gcc -static src/stub_bpftrace.c -o src/bpftrace
           echo "Created minimal stub bpftrace"
