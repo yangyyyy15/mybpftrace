@@ -1,0 +1,189 @@
+name: "Alpine Static Build"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-alpine-static:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Generate release timestamp
+      id: timestamp
+      run: echo "release_time=$(date +'%Y%m%d_%H%M%S')" >> $GITHUB_OUTPUT
+
+    - name: Prepare build script
+      run: |
+        mkdir -p docker
+        cat > docker/build-alpine.sh << 'EOF'
+        #!/bin/bash
+        set -ex
+
+        # Get number of CPU cores for parallel build
+        NPROC=$(nproc)
+
+        # Create a build directory
+        mkdir -p build
+
+        # Run CMake configuration with static linking enabled
+        cd build
+        cmake .. \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_VERBOSE_MAKEFILE=ON \
+          -DBUILD_TESTING=OFF \
+          -DSTATIC_LINKING=ON \
+          -DENABLE_MAN=OFF \
+          -DUSE_SYSTEM_BPF_BCC=ON
+
+        # Build bpftrace
+        make -j${NPROC}
+
+        # Check if the binary was successfully built
+        if [ -f "src/bpftrace" ]; then
+          echo "Build successful!"
+          
+          # Show binary info
+          file src/bpftrace
+          
+          # Verify static linking with musl
+          echo "Checking library dependencies:"
+          ldd src/bpftrace || echo "No dynamic dependencies (fully static)"
+          
+          # Create release package
+          mkdir -p release/aarch64
+          cp src/bpftrace release/aarch64/
+          
+          # Copy tools if available
+          if [ -d "../tools" ]; then
+            cp -r ../tools release/aarch64/
+            chmod +x release/aarch64/tools/*.bt 2>/dev/null || true
+          fi
+          
+          # Create tarball 
+          cd release
+          tar -czf /bpftrace/bpftrace-alpine-static.tar.gz aarch64
+          echo "Package created: bpftrace-alpine-static.tar.gz"
+          
+          exit 0
+        else
+          echo "Build failed - bpftrace binary not found!"
+          exit 1
+        fi
+        EOF
+        chmod +x docker/build-alpine.sh
+
+    - name: Create Dockerfile
+      run: |
+        mkdir -p docker
+        cat > docker/Dockerfile.alpine << 'EOF'
+        # Dockerfile for building static bpftrace with musl libc
+        FROM alpine:3.19
+
+        RUN apk add --update \
+          asciidoctor \
+          argp-standalone \
+          bash \
+          binutils-dev \
+          bison \
+          bzip2-dev \
+          bzip2-static \
+          build-base \
+          cereal \
+          clang17-dev \
+          clang17-extra-tools \
+          clang17-libs \
+          clang17-static \
+          cmake \
+          elfutils-dev \
+          flex-dev \
+          git \
+          libbpf-dev \
+          libelf-static \
+          libpcap-dev \
+          libc6-compat \
+          linux-headers \
+          llvm17-dev \
+          llvm17-static \
+          musl-dev \
+          openssl-dev \
+          python3 \
+          wget \
+          xxd \
+          xz-dev \
+          xz-static \
+          zlib-dev \
+          zlib-static \
+          zstd-dev \
+          zstd-static
+
+        # Create required symbolic links
+        RUN ln -s /usr/lib/llvm17/lib/libclang-cpp.a /usr/lib/libclang-cpp.a && \
+            ln -s /usr/lib/llvm17/lib/libclang.a /usr/lib/libclang.a && \
+            ln -s /usr/include/llvm17/llvm /usr/include/llvm && \
+            ln -s /usr/include/llvm17/llvm-c /usr/include/llvm-c && \
+            ln -s /usr/include/clang17 /usr/include/clang
+
+        # Fix LLVM expecting to use shared zstd lib by modifying the config
+        RUN find /usr -name "*.cmake" -type f -exec grep -l "zstd::libzstd_shared" {} \; | \
+            xargs -r sed -i 's/zstd::libzstd_shared/zstd::libzstd_static/g'
+
+        # Create a symlink for clang cmake files
+        RUN ln -s 'clang17' /usr/lib/cmake/clang
+
+        # Some versions of Alpine may need this symlink
+        RUN if [ ! -e /lib/ld-musl-x86_64.so.1 ] && [ -e /lib/libc.musl-x86_64.so.1 ]; then \
+            ln -s /lib/libc.musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1; \
+        fi
+
+        # Create a build script that will be executed in the container
+        COPY build-alpine.sh /build-alpine.sh
+        RUN chmod +x /build-alpine.sh
+
+        WORKDIR /bpftrace
+        ENTRYPOINT ["/build-alpine.sh"]
+        EOF
+
+    - name: Build Docker image for ARM64 architecture
+      run: |
+        docker buildx build --platform linux/arm64 --load -t bpftrace-alpine-static -f docker/Dockerfile.alpine docker/
+
+    - name: Build bpftrace static binary for ARM64
+      run: |
+        docker run --platform linux/arm64 --rm -v $(pwd):/bpftrace -w /bpftrace bpftrace-alpine-static
+
+        # Check if the build was successful
+        if [ -f "bpftrace-alpine-static.tar.gz" ]; then
+          echo "Static build completed successfully."
+        else
+          echo "Static build failed - package not created."
+          exit 1
+        fi
+
+    - name: Create GitHub Release
+      if: success()
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: bpftrace-alpine-static-${{ steps.timestamp.outputs.release_time }}
+        name: BPFTrace Alpine Static Build ${{ steps.timestamp.outputs.release_time }}
+        body: |
+          BPFTrace for ARM64 - Fully Static Build with musl libc
+          
+          This is a completely static build of BPFTrace for ARM64 architecture using Alpine Linux and musl libc.
+          Built on: ${{ steps.timestamp.outputs.release_time }}
+          
+          Unlike glibc-based static builds, this binary should work on any Linux distribution without dependencies.
+        files: |
+          bpftrace-alpine-static.tar.gz
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
