@@ -4,6 +4,21 @@ set -ex
 # Get number of CPU cores for parallel build
 NPROC=$(nproc)
 
+# Display BCC version and paths
+echo "BCC information:"
+find /usr -name bcc_version.h || echo "bcc_version.h not found"
+find /usr -name libbcc.a || echo "libbcc.a not found"
+find /usr -name libbcc.so || echo "libbcc.so not found"
+
+# If BCC was built from source, create symlinks if needed
+if [ ! -f "/usr/lib/libbcc.a" ] && [ -f "/usr/lib/x86_64-linux-gnu/libbcc.a" ]; then
+    ln -s /usr/lib/x86_64-linux-gnu/libbcc.a /usr/lib/libbcc.a
+fi
+
+if [ ! -f "/usr/lib/libbcc_bpf.a" ] && [ -f "/usr/lib/x86_64-linux-gnu/libbcc_bpf.a" ]; then
+    ln -s /usr/lib/x86_64-linux-gnu/libbcc_bpf.a /usr/lib/libbcc_bpf.a
+fi
+
 # Create a build directory
 mkdir -p build
 
@@ -15,7 +30,9 @@ cmake .. \
   -DBUILD_TESTING=OFF \
   -DSTATIC_LINKING=ON \
   -DENABLE_MAN=OFF \
-  -DUSE_SYSTEM_BPF_BCC=ON
+  -DUSE_SYSTEM_BPF_BCC=ON \
+  -DLIBBCC_INCLUDE_DIRS=/usr/include \
+  -DLIBBCC_LIBRARIES=/usr/lib/libbcc.a
 
 # Build bpftrace
 make -j${NPROC}
