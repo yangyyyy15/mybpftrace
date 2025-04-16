@@ -24,7 +24,9 @@ RUN apk add --update \
   clang17-libs \
   clang17-static \
   cmake \
+  elfutils \
   elfutils-dev \
+  elfutils-static \
   flex-dev \
   git \
   libbpf-dev \
@@ -88,6 +90,16 @@ RUN mkdir -p /tmp/empty && cd /tmp/empty && \
     echo "Stub libraries created:" && \
     ls -la /usr/lib/llvm17/lib/*.a
 
+# Create stubs for missing eu_search_tree functions
+RUN mkdir -p /tmp/eu_stub && cd /tmp/eu_stub && \
+    echo "void eu_search_tree_init() {}" > eu_stub.c && \
+    echo "void eu_search_tree_fini() {}" >> eu_stub.c && \
+    gcc -c eu_stub.c -o eu_stub.o && \
+    mkdir -p /usr/lib && \
+    ar rcs /usr/lib/libeu.a eu_stub.o && \
+    echo "Created stub for libeu.a with eu_search_tree functions" && \
+    cd / && rm -rf /tmp/eu_stub
+
 # Compile and install newer libbpf version
 RUN apk add --no-cache git make gcc musl-dev elfutils-dev && \
     cd /tmp && \
@@ -128,6 +140,16 @@ RUN mkdir -p /usr/lib/llvm17/lib/cmake/llvm && \
     if [ -f "/usr/lib/llvm17/lib/cmake/llvm/LLVMExports.cmake" ]; then \
       echo "include(\${CMAKE_CURRENT_LIST_DIR}/LLVMTestPatch.cmake)" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMExports.cmake; \
     fi
+
+# Disable PCAP to avoid PIC issues
+RUN mkdir -p /usr/local/share/cmake/Modules && \
+    echo "# Custom FindPCAP.cmake that disables PCAP due to PIC issues" > /usr/local/share/cmake/Modules/FindPCAP.cmake && \
+    echo "set(PCAP_FOUND FALSE)" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
+    echo "set(PCAP_INCLUDE_DIRS \"\")" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
+    echo "set(PCAP_LIBRARIES \"\")" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
+    echo "message(STATUS \"PCAP support disabled to avoid PIC issues in static build\")" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
+    echo "include(FindPackageHandleStandardArgs)" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
+    echo "find_package_handle_standard_args(PCAP DEFAULT_MSG PCAP_FOUND)" >> /usr/local/share/cmake/Modules/FindPCAP.cmake
 
 # If bcc-dev doesn't provide all needed files, compile from source
 RUN if [ ! -f "/usr/include/bcc/bcc_version.h" ]; then \
