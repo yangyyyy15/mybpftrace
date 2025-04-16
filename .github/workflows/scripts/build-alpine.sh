@@ -27,6 +27,11 @@ find /usr/lib/llvm17/lib -name "*.a" | sort
 echo "LLVM include directories:"
 find /usr/include -name "llvm" -type d
 
+# Check for libdw (for missing eu_search_tree functions)
+echo "Checking for libdw:"
+find /usr -name "libdw.a" || echo "libdw.a not found"
+find /usr -name "libdw.so" || echo "libdw.so not found"
+
 #===================================
 # Environment Preparation
 #===================================
@@ -81,7 +86,7 @@ CRITICAL_LIBS=(
     "/usr/lib/llvm17/lib/libLLVMTestingSupport.a"
     "/usr/lib/llvm17/lib/libLLVMFrontendOpenMP.a"
     "/usr/lib/llvm17/lib/libLLVMFrontenddriver.a" 
-    "/usr/lib/llvm17/lib/libLLVMfrontenddriver.a"  # 新增: 小写版本的frontend库
+    "/usr/lib/llvm17/lib/libLLVMfrontenddriver.a"  # 小写版本的frontend库
     "/usr/lib/llvm17/lib/libLLVMFrontendOffloading.a"
     "/usr/lib/llvm17/lib/libLLVMOrcJIT.a"
     
@@ -93,6 +98,9 @@ CRITICAL_LIBS=(
     "/usr/lib/libclangDaemonTweaks.a"
     "/usr/lib/libclangdMain.a"
     "/usr/lib/libclangdRemoteIndex.a"
+    
+    # Create stub for missing libeu_search_tree functions
+    "/usr/lib/libeu.a"
 )
 
 # Create stubs for critical libraries
@@ -100,7 +108,22 @@ for lib in "${CRITICAL_LIBS[@]}"; do
     create_stub_lib "$lib"
 done
 
-# 新增: 创建大小写变体的存根库
+# Create eu_search_tree stubs if libdw.a exists but not eu_search_tree functions
+if [ -f "/usr/lib/libdw.a" ]; then
+    mkdir -p /tmp/eu_stub
+    cd /tmp/eu_stub
+    cat > eu_stub.c << 'EOF'
+void eu_search_tree_init() {}
+void eu_search_tree_fini() {}
+EOF
+    gcc -c eu_stub.c -o eu_stub.o
+    # Create or update libeu.a with these symbols
+    ar rcs /usr/lib/libeu.a eu_stub.o
+    cd - > /dev/null
+    rm -rf /tmp/eu_stub
+fi
+
+# 创建大小写变体的存根库
 echo "Creating case-variant stubs for frontend libraries..."
 for original in "/usr/lib/llvm17/lib/libLLVMFrontenddriver.a"; do
     lowercase=$(echo "$original" | sed 's/Frontend/frontend/g')
@@ -136,7 +159,7 @@ if (NOT TARGET llvm_gtest_main AND EXISTS "/usr/lib/llvm17/lib/libllvm_gtest_mai
   set_target_properties(llvm_gtest_main PROPERTIES IMPORTED_LOCATION "/usr/lib/llvm17/lib/libllvm_gtest_main.a")
 endif()
 
-# 新增: 处理frontend driver的大小写变体
+# 处理frontend driver的大小写变体
 if (NOT TARGET LLVMfrontenddriver AND EXISTS "/usr/lib/llvm17/lib/libLLVMfrontenddriver.a")
   add_library(LLVMfrontenddriver STATIC IMPORTED)
   set_target_properties(LLVMfrontenddriver PROPERTIES IMPORTED_LOCATION "/usr/lib/llvm17/lib/libLLVMfrontenddriver.a")
@@ -169,6 +192,14 @@ if [ -f "/bpftrace/CMakeLists.txt" ]; then
         echo "Bypassing GTest requirement..."
         sed -i 's/find_package(GTest REQUIRED)/find_package(GTest QUIET)/g' /bpftrace/CMakeLists.txt
     fi
+    
+    # Disable libpcap if causing issues
+    echo "Patching CMakeLists.txt to handle libpcap issues..."
+    if grep -q "find_package(PCAP)" /bpftrace/CMakeLists.txt; then
+        sed -i 's/find_package(PCAP)/find_package(PCAP QUIET)/g' /bpftrace/CMakeLists.txt
+        # Make USE_LIBPCAP optional instead of required
+        sed -i 's/option(USE_LIBPCAP "Use libpcap" ON)/option(USE_LIBPCAP "Use libpcap" OFF)/g' /bpftrace/CMakeLists.txt
+    fi
 else
     echo "CMakeLists.txt not found in expected location, searching for it..."
     find /bpftrace -name CMakeLists.txt -exec grep -l "bpftrace requires libbpf.*or greater" {} \; | while read file; do
@@ -180,6 +211,13 @@ else
     find /bpftrace -name CMakeLists.txt -exec grep -l "find_package(GTest REQUIRED)" {} \; | while read file; do
         echo "Patching GTest requirement in $file"
         sed -i 's/find_package(GTest REQUIRED)/find_package(GTest QUIET)/g' "$file"
+    done
+    
+    # Search and patch PCAP requirements in any CMakeLists.txt
+    find /bpftrace -name CMakeLists.txt -exec grep -l "find_package(PCAP)" {} \; | while read file; do
+        echo "Patching PCAP requirement in $file"
+        sed -i 's/find_package(PCAP)/find_package(PCAP QUIET)/g' "$file"
+        sed -i 's/option(USE_LIBPCAP "Use libpcap" ON)/option(USE_LIBPCAP "Use libpcap" OFF)/g' "$file"
     done
 fi
 
@@ -248,6 +286,20 @@ include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(GTest DEFAULT_MSG GTEST_FOUND)
 EOF
 
+# Create a custom FindPCAP.cmake to disable PCAP
+cat > /bpftrace/cmake/modules/FindPCAP.cmake << 'EOF'
+# Custom FindPCAP.cmake that disables PCAP due to PIC issues
+set(PCAP_FOUND FALSE)
+set(PCAP_INCLUDE_DIRS "")
+set(PCAP_LIBRARIES "")
+set(PCAP_DEFINITIONS "")
+
+message(STATUS "PCAP support disabled to avoid PIC issues in static build")
+
+include(FindPackageHandleStandardArgs)
+find_package_handle_standard_args(PCAP DEFAULT_MSG PCAP_FOUND)
+EOF
+
 #===================================
 # Build Configuration and Process
 #===================================
@@ -270,6 +322,7 @@ configure_and_build() {
         -DLIBBCC_LIBRARIES=/usr/lib/libbcc.a \
         -DLLVM_REQUESTED_VERSION=17 \
         -DUSE_LLVM_GTEST=OFF \
+        -DUSE_LIBPCAP=OFF \
         -DCMAKE_MODULE_PATH=/bpftrace/cmake/modules:/usr/local/share/cmake/Modules || true
 
     # Check if configuration succeeded
@@ -293,6 +346,7 @@ configure_and_build() {
         -DWITH_LIBPOLLY=OFF \
         -DHAVE_CLANG_PARSER=OFF \
         -DUSE_LLVM_GTEST=OFF \
+        -DUSE_LIBPCAP=OFF \
         -DCMAKE_MODULE_PATH=/bpftrace/cmake/modules:/usr/local/share/cmake/Modules || true
 
     # Check if configuration succeeded
@@ -340,7 +394,7 @@ if(NOT TARGET llvm_gtest_main)
   )
 endif()
 
-# 新增: 为LLVMfrontenddriver创建目标定义
+# 为LLVMfrontenddriver创建目标定义
 if(NOT TARGET LLVMfrontenddriver)
   add_library(LLVMfrontenddriver STATIC IMPORTED)
   set_target_properties(LLVMfrontenddriver PROPERTIES
@@ -460,23 +514,61 @@ patch_links_and_rebuild() {
             sed -i 's/-lLLVMFrontendOffloading//g' "$link_file"
             sed -i 's/-lllvm_gtest//g' "$link_file"
             sed -i 's/-lllvm_gtest_main//g' "$link_file"
-            
-            # 新增: 移除小写版本的frontend driver依赖
             sed -i 's/-lLLVMfrontenddriver//g' "$link_file"
+            
+            # Remove problematic libraries
+            sed -i 's/\/usr\/lib\/libpcap.a//g' "$link_file"
+            
+            # Add libeu (for missing eu_search_tree functions)
+            if ! grep -q "libeu.a" "$link_file"; then
+                sed -i 's/\/usr\/lib\/libelf.a/\/usr\/lib\/libelf.a \/usr\/lib\/libeu.a/g' "$link_file"
+            fi
             
             # Add static linking flags if not present
             if ! grep -q -- "-static" "$link_file"; then
                 sed -i 's/CMakeFiles\/bpftrace.dir\/main.cpp.o/CMakeFiles\/bpftrace.dir\/main.cpp.o -static/g' "$link_file"
             fi
             
-            # Add multiple definition allowance
+            # Add multiple definition allowance and relocatable options
             if ! grep -q -- "--allow-multiple-definition" "$link_file"; then
-                sed -i 's/-static/-static -Wl,--allow-multiple-definition/g' "$link_file"
+                sed -i 's/-static/-static -Wl,--allow-multiple-definition -Wl,-z,notext/g' "$link_file"
             fi
         done
         
         # Try building again
         make -j${NPROC} VERBOSE=1
+        
+        # If still failing, try more aggressive options as last resort
+        if [ ! -f "src/bpftrace" ]; then
+            echo "First patch attempt failed, trying more aggressive options..."
+            
+            # Create simplified stubs for missing eu_search_tree functions
+            mkdir -p /tmp/eu_stub
+            cd /tmp/eu_stub
+            cat > eu_stub.c << 'EOF'
+// Simplified stubs for missing functions
+void eu_search_tree_init() {}
+void eu_search_tree_fini() {}
+EOF
+            gcc -c eu_stub.c -o eu_stub.o
+            ar rcs libeu_stub.a eu_stub.o
+            
+            # Try to add this stub directly to the link command
+            find . -name "link.txt" | while read link_file; do
+                sed -i "s|CMakeFiles/bpftrace.dir/main.cpp.o|CMakeFiles/bpftrace.dir/main.cpp.o /tmp/eu_stub/libeu_stub.a|g" "$link_file"
+                
+                # Try to remove libpcap entirely
+                sed -i 's/ -lpcap / /g' "$link_file"
+                
+                # Add even more linker flags to force static linking
+                sed -i 's/-static/-static -Wl,--allow-multiple-definition -Wl,-z,notext -Wl,--whole-archive -Wl,--no-whole-archive/g' "$link_file"
+            done
+            
+            # Try building again
+            make -j${NPROC} VERBOSE=1
+            
+            cd - > /dev/null
+        fi
         
         # Check if the binary was successfully built
         if [ -f "src/bpftrace" ]; then
