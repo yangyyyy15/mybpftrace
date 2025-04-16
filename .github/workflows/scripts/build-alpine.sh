@@ -445,15 +445,32 @@ find . -name "link.txt" | while read link_file; do
     sed -i 's/-lllvm_gtest//g' "$link_file"
     sed -i 's/-lllvm_gtest_main//g' "$link_file"
     
-    # Add static linking flags if not present
-    if ! grep -q -- "-static" "$link_file"; then
-        sed -i 's/CMakeFiles\/bpftrace.dir\/main.cpp.o/CMakeFiles\/bpftrace.dir\/main.cpp.o -static/g' "$link_file"
+    # 清理错误格式的选项
+    sed -i 's/--allow-multiple-definition-libgcc/--allow-multiple-definition/g' "$link_file"
+    sed -i 's/--allow-multiple-definition-libstdc++/--allow-multiple-definition/g' "$link_file"
+    
+    # 确保只有一次添加--allow-multiple-definition
+    if ! grep -q -- "--allow-multiple-definition" "$link_file"; then
+        # 在第一个-static标志后添加--allow-multiple-definition选项
+        sed -i 's/-static/-static -Wl,--allow-multiple-definition/g' "$link_file"
+    else
+        # 如果已经存在--allow-multiple-definition，确保不重复添加
+        echo "--allow-multiple-definition already exists, not adding again"
     fi
     
-    # Add multiple definition allowance
-    if ! grep -q -- "--allow-multiple-definition" "$link_file"; then
-        sed -i 's/-static/-static -Wl,--allow-multiple-definition/g' "$link_file"
+    # 修复可能损坏的链接选项
+    # 将任何连在一起的选项分开
+    sed -i 's/-static-Wl,/-static -Wl,/g' "$link_file"
+    
+    # 确保静态链接的正确格式 (主要是针对-static而不是-static-lib*)
+    if ! grep -q -- "^-static " "$link_file" && ! grep -q -- " -static " "$link_file"; then
+        # 在开头添加-static选项
+        sed -i 's/CMakeFiles\/bpftrace.dir\/main.cpp.o/-static CMakeFiles\/bpftrace.dir\/main.cpp.o/g' "$link_file"
     fi
+
+    # 打印修改后的链接命令
+    echo "Modified link command:"
+    cat "$link_file"
 done
 
 # Try building again
