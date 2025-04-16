@@ -81,6 +81,7 @@ CRITICAL_LIBS=(
     "/usr/lib/llvm17/lib/libLLVMTestingSupport.a"
     "/usr/lib/llvm17/lib/libLLVMFrontendOpenMP.a"
     "/usr/lib/llvm17/lib/libLLVMFrontenddriver.a" 
+    "/usr/lib/llvm17/lib/libLLVMfrontenddriver.a"  # 添加小写版本
     "/usr/lib/llvm17/lib/libLLVMFrontendOffloading.a"
     "/usr/lib/llvm17/lib/libLLVMOrcJIT.a"
     
@@ -98,6 +99,15 @@ CRITICAL_LIBS=(
 for lib in "${CRITICAL_LIBS[@]}"; do
     create_stub_lib "$lib"
 done
+
+# 创建大小写变体之间的符号链接
+if [ -f "/usr/lib/llvm17/lib/libLLVMFrontenddriver.a" ] && [ ! -f "/usr/lib/llvm17/lib/libLLVMfrontenddriver.a" ]; then
+    ln -sf "/usr/lib/llvm17/lib/libLLVMFrontenddriver.a" "/usr/lib/llvm17/lib/libLLVMfrontenddriver.a"
+fi
+
+if [ -f "/usr/lib/llvm17/lib/libLLVMfrontenddriver.a" ] && [ ! -f "/usr/lib/llvm17/lib/libLLVMFrontenddriver.a" ]; then
+    ln -sf "/usr/lib/llvm17/lib/libLLVMfrontenddriver.a" "/usr/lib/llvm17/lib/libLLVMFrontenddriver.a"
+fi
 
 # Scan all CMake files and create any other missing library stubs
 for cmake_file in $(find /usr/lib/llvm17 -name "*.cmake" -type f 2>/dev/null); do
@@ -418,52 +428,36 @@ fi
 #===================================
 # Build bpftrace
 echo "=== Building bpftrace ==="
-make -j${NPROC} VERBOSE=1
+make -j${NPROC} VERBOSE=1 || true  # 即使失败也继续执行
 
-# Patch link commands if needed
-patch_links_and_rebuild() {
-    if [ ! -f "src/bpftrace" ]; then
-        echo "Build failed, trying to patch link commands..."
-        find . -name "link.txt" | while read link_file; do
-            echo "Patching ${link_file}"
-            
-            # Remove references to problematic libraries
-            sed -i 's/-lLLVMTestingSupport//g' "$link_file"
-            sed -i 's/-lLLVMTestingAnnotations//g' "$link_file"
-            sed -i 's/-lLLVMFrontendOpenMP//g' "$link_file"
-            sed -i 's/-lLLVMFrontenddriver//g' "$link_file"
-            sed -i 's/-lLLVMFrontendOffloading//g' "$link_file"
-            sed -i 's/-lllvm_gtest//g' "$link_file"
-            sed -i 's/-lllvm_gtest_main//g' "$link_file"
-            
-            # Add static linking flags if not present
-            if ! grep -q -- "-static" "$link_file"; then
-                sed -i 's/CMakeFiles\/bpftrace.dir\/main.cpp.o/CMakeFiles\/bpftrace.dir\/main.cpp.o -static/g' "$link_file"
-            fi
-            
-            # Add multiple definition allowance
-            if ! grep -q -- "--allow-multiple-definition" "$link_file"; then
-                sed -i 's/-static/-static -Wl,--allow-multiple-definition/g' "$link_file"
-            fi
-        done
-        
-        # Try building again
-        make -j${NPROC} VERBOSE=1
-        
-        # Check if the binary was successfully built
-        if [ -f "src/bpftrace" ]; then
-            return 0
-        else
-            return 1
-        fi
+# 无论初始构建是否成功，都尝试修补链接命令
+echo "Patching link commands to handle problematic libraries..."
+find . -name "link.txt" | while read link_file; do
+    echo "Patching ${link_file}"
+    
+    # Remove references to problematic libraries
+    sed -i 's/-lLLVMTestingSupport//g' "$link_file"
+    sed -i 's/-lLLVMTestingAnnotations//g' "$link_file"
+    sed -i 's/-lLLVMFrontendOpenMP//g' "$link_file"
+    sed -i 's/-lLLVMFrontenddriver//g' "$link_file"
+    sed -i 's/-lLLVMfrontenddriver//g' "$link_file"  # 同时处理小写版本
+    sed -i 's/-lLLVMFrontendOffloading//g' "$link_file"
+    sed -i 's/-lllvm_gtest//g' "$link_file"
+    sed -i 's/-lllvm_gtest_main//g' "$link_file"
+    
+    # Add static linking flags if not present
+    if ! grep -q -- "-static" "$link_file"; then
+        sed -i 's/CMakeFiles\/bpftrace.dir\/main.cpp.o/CMakeFiles\/bpftrace.dir\/main.cpp.o -static/g' "$link_file"
     fi
     
-    # Binary already exists
-    return 0
-}
+    # Add multiple definition allowance
+    if ! grep -q -- "--allow-multiple-definition" "$link_file"; then
+        sed -i 's/-static/-static -Wl,--allow-multiple-definition/g' "$link_file"
+    fi
+done
 
-# Try to patch link commands and rebuild if necessary
-patch_links_and_rebuild
+# Try building again
+make -j${NPROC} VERBOSE=1
 
 #===================================
 # Package Creation
