@@ -64,5 +64,13 @@ if(NOT TARGET llvm_gtest_main AND EXISTS "${LLVM_LIBRARY_DIRS}/libllvm_gtest_mai
   )
 endif()
 
+# 添加对LLVMfrontenddriver的支持（小写版本的frontend库）
+if(NOT TARGET LLVMfrontenddriver AND EXISTS "${LLVM_LIBRARY_DIRS}/libLLVMfrontenddriver.a")
+  add_library(LLVMfrontenddriver STATIC IMPORTED)
+  set_target_properties(LLVMfrontenddriver PROPERTIES 
+    IMPORTED_LOCATION "${LLVM_LIBRARY_DIRS}/libLLVMfrontenddriver.a"
+  )
+endif()
+
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(LLVM DEFAULT_MSG LLVM_FOUND)
