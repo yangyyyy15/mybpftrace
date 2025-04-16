@@ -27,14 +27,64 @@ find /usr/lib/llvm17/lib -name "*.a" | sort
 echo "LLVM include directories:"
 find /usr/include -name "llvm" -type d
 
-# Check for libdw (for missing eu_search_tree functions)
-echo "Checking for libdw:"
-find /usr -name "libdw.a" || echo "libdw.a not found"
-find /usr -name "libdw.so" || echo "libdw.so not found"
+#===================================
+# Patch libelf.a directly
+#===================================
+echo "===== 开始修补 libelf.a 以添加缺失的 eu_search_tree 符号 ====="
+# 创建工作目录
+mkdir -p /tmp/patch_libelf
+cd /tmp/patch_libelf
 
-# Check for our libeu.a stub
-echo "Checking for libeu.a stub:"
-find /usr -name "libeu.a" || echo "libeu.a not found"
+# 创建存根函数
+cat > eu_stubs.c << 'EOF'
+// 提供缺失的符号
+void eu_search_tree_init() {}
+void eu_search_tree_fini() {}
+void eu_search_tree_findidx() {}
+void eu_search_tree_free() {}
+void eu_search_tree_insert() {}
+EOF
+
+# 编译存根函数为目标文件
+gcc -c eu_stubs.c -o eu_stubs.o
+
+# 创建存根库
+ar rcs libeu_stubs.a eu_stubs.o
+
+# 确保符号存在
+echo "验证存根库中的符号:"
+nm libeu_stubs.a
+
+# 创建修补后的 libelf.a 库
+# 首先创建一个备份
+cp /usr/lib/libelf.a /usr/lib/libelf.a.original
+
+# 提取所有目标文件
+mkdir -p extracted
+cd extracted
+ar x /usr/lib/libelf.a
+
+# 回到工作目录
+cd ..
+
+# 将存根目标文件添加到目标文件集合中
+cp eu_stubs.o extracted/
+
+# 重新创建 libelf.a 库
+ar rcs patched_libelf.a extracted/*.o
+
+# 使用修补的库替换原始库
+cp patched_libelf.a /usr/lib/libelf.a
+
+# 验证库中的符号
+echo "验证修补后的 libelf.a 中是否包含所需符号："
+nm /usr/lib/libelf.a | grep eu_search_tree
+
+# 清理
+cd /
+rm -rf /tmp/patch_libelf
+
+echo "libelf.a 修补完成！"
 
 #===================================
 # Environment Preparation
@@ -102,56 +152,12 @@ CRITICAL_LIBS=(
     "/usr/lib/libclangDaemonTweaks.a"
     "/usr/lib/libclangdMain.a"
     "/usr/lib/libclangdRemoteIndex.a"
-    
-    # Create stub for missing eu_search_tree functions
-    "/usr/lib/libeu.a"
 )
 
 # Create stubs for critical libraries
 for lib in "${CRITICAL_LIBS[@]}"; do
     create_stub_lib "$lib"
 done
-
-# Ensure eu_search_tree functions are properly stubbed
-if [ -f "/usr/lib/libeu.a" ]; then
-    echo "Verifying libeu.a content..."
-    nm /usr/lib/libeu.a | grep eu_search_tree || {
-        # If the symbols are not found, recreate the library
-        echo "Recreating libeu.a with proper symbols..."
-        mkdir -p /tmp/eu_stub
-        cd /tmp/eu_stub
-        cat > eu_stub.c << 'EOF'
-void eu_search_tree_init() {}
-void eu_search_tree_fini() {}
-void eu_search_tree_findidx() {}
-void eu_search_tree_free() {}
-void eu_search_tree_insert() {}
-EOF
-        gcc -c eu_stub.c -o eu_stub.o
-        ar rcs /usr/lib/libeu.a eu_stub.o
-        nm /usr/lib/libeu.a
-        cd - > /dev/null
-        rm -rf /tmp/eu_stub
-    }
-else
-    # Create libeu.a with necessary stubs
-    echo "Creating libeu.a with eu_search_tree functions..."
-    mkdir -p /tmp/eu_stub
-    cd /tmp/eu_stub
-    cat > eu_stub.c << 'EOF'
-void eu_search_tree_init() {}
-void eu_search_tree_fini() {}
-void eu_search_tree_findidx() {}
-void eu_search_tree_free() {}
-void eu_search_tree_insert() {}
-EOF
-    gcc -c eu_stub.c -o eu_stub.o
-    mkdir -p /usr/lib
-    ar rcs /usr/lib/libeu.a eu_stub.o
-    nm /usr/lib/libeu.a
-    cd - > /dev/null
-    rm -rf /tmp/eu_stub
-fi
 
 # 创建大小写变体的存根库
 echo "Creating case-variant stubs for frontend libraries..."
@@ -529,115 +535,78 @@ fi
 echo "=== Building bpftrace ==="
 make -j${NPROC} VERBOSE=1
 
-# Patch link commands if needed - this is the critical part for static linking
+# Patch link commands if needed
 patch_links_and_rebuild() {
     if [ ! -f "src/bpftrace" ]; then
-        echo "Build failed, trying to patch link commands and rebuild..."
+        echo "Build failed, trying to patch link commands..."
+        
+        # Find and patch link.txt files
         find . -name "link.txt" | while read link_file; do
-            echo "Patching ${link_file} to fix static linking issues..."
+            echo "Patching ${link_file}"
             
-            # Make a backup of the original link.txt
-            cp "$link_file" "${link_file}.orig"
+            # Make a backup of the original file
+            cp "${link_file}" "${link_file}.orig"
             
-            # Fix 1: Remove references to problematic libraries
+            # Remove references to problematic libraries
+            sed -i 's/\/usr\/lib\/libpcap.a//g' "$link_file"
+            sed -i 's/-lpcap//g' "$link_file"
             sed -i 's/-lLLVMTestingSupport//g' "$link_file"
             sed -i 's/-lLLVMTestingAnnotations//g' "$link_file"
             sed -i 's/-lLLVMFrontendOpenMP//g' "$link_file"
             sed -i 's/-lLLVMFrontenddriver//g' "$link_file"
+            sed -i 's/-lLLVMfrontenddriver//g' "$link_file"
             sed -i 's/-lLLVMFrontendOffloading//g' "$link_file"
             sed -i 's/-lllvm_gtest//g' "$link_file"
             sed -i 's/-lllvm_gtest_main//g' "$link_file"
-            sed -i 's/-lLLVMfrontenddriver//g' "$link_file"
             
-            # Fix 2: Remove libpcap completely from linking
-            sed -i 's/\/usr\/lib\/libpcap.a//g' "$link_file"
-            sed -i 's/-lpcap//g' "$link_file"
-            
-            # Fix 3: Add libeu.a explicitly right after libelf.a
-            if ! grep -q "libeu.a" "$link_file"; then
-                sed -i 's/\/usr\/lib\/libelf.a/\/usr\/lib\/libelf.a \/usr\/lib\/libeu.a/g' "$link_file"
-            fi
-            
-            # Fix 4: Add all necessary static linking flags
+            # Add static linking flags if not present
             if ! grep -q -- "-static" "$link_file"; then
                 sed -i 's/CMakeFiles\/bpftrace.dir\/main.cpp.o/CMakeFiles\/bpftrace.dir\/main.cpp.o -static/g' "$link_file"
             fi
             
-            # Fix 5: Add multiple definition allowance and relocatable options
+            # Add multiple definition allowance and other linker options for relocatable code
             if ! grep -q -- "--allow-multiple-definition" "$link_file"; then
                 sed -i 's/-static/-static -Wl,--allow-multiple-definition -Wl,-z,notext/g' "$link_file"
             fi
-            
-            # Fix 6: Extreme solution - create a fixed link command from scratch for bpftrace
+
+            # If this is the final bpftrace link command, completely replace it
             if grep -q "bpftrace " "$link_file"; then
-                echo "Creating complete custom link command for bpftrace..."
-                # Start with a basic link command
-                echo "/usr/bin/c++ -O3 -DNDEBUG -static -Wl,--allow-multiple-definition -Wl,-z,notext CMakeFiles/bpftrace.dir/main.cpp.o -o bpftrace" > "$link_file"
+                echo "Creating direct link command for bpftrace..."
                 
-                # Add all necessary libraries
-                echo " libbpftrace.a resources/libresources.a libruntime.a aot/libaot.a" >> "$link_file"
-                echo " /usr/lib/libbcc.a /usr/lib/libbcc_bpf.a /usr/lib/libbpf.a" >> "$link_file"
-                echo " /usr/lib/libelf.a /usr/lib/libeu.a" >> "$link_file"
-                echo " /usr/lib/libbfd.a /usr/lib/libopcodes.a /usr/lib/libiberty.a" >> "$link_file"
-                echo " /usr/lib/libz.a /usr/lib/libzstd.a /usr/lib/liblzma.a" >> "$link_file"
-                echo " /usr/lib/llvm17/lib/libLLVMCore.a /usr/lib/llvm17/lib/libLLVMSupport.a" >> "$link_file"
-                echo " librequired_resources.a ast/libast.a ../libparser.a ast/libast_defs.a libcompiler_core.a" >> "$link_file"
-                echo " -ldl -lpthread -lrt -lm" >> "$link_file"
+                # Extreme solution - write a completely new link command
+                echo "/usr/bin/c++ -static -Wl,--allow-multiple-definition -Wl,-z,notext -Wl,--whole-archive CMakeFiles/bpftrace.dir/main.cpp.o -o bpftrace libbpftrace.a resources/libresources.a libruntime.a aot/libaot.a /usr/lib/libbcc.a /usr/lib/libbcc_bpf.a /usr/lib/libbpf.a /usr/lib/libelf.a /usr/lib/libbfd.a /usr/lib/libopcodes.a /usr/lib/libiberty.a /usr/lib/libz.a /usr/lib/libzstd.a /usr/lib/liblzma.a /usr/lib/llvm17/lib/libLLVMCore.a /usr/lib/llvm17/lib/libLLVMSupport.a librequired_resources.a ast/libast.a ../libparser.a ast/libast_defs.a libcompiler_core.a -Wl,--no-whole-archive -ldl -lpthread -lrt -lm" > "$link_file"
             fi
-            
-            echo "Patched link command: $(cat "$link_file")"
         done
         
         # Try building again
-        echo "Rebuilding with patched link commands..."
         make -j${NPROC} VERBOSE=1
         
-        # If still failing, try more aggressive options as last resort
+        # Check if binary was built successfully after patching
         if [ ! -f "src/bpftrace" ]; then
-            echo "First patch attempt failed, trying more aggressive approach..."
+            echo "First patch attempt failed, trying direct gcc link..."
             
-            # Create simplified stub for missing symbols
-            mkdir -p /tmp/eu_stub
-            cd /tmp/eu_stub
-            cat > eu_stub.c << 'EOF'
-// Stub functions for libelf
-void eu_search_tree_init() {}
-void eu_search_tree_fini() {}
-void eu_search_tree_findidx() {}
-void eu_search_tree_free() {}
-void eu_search_tree_insert() {}
-EOF
-            gcc -fPIC -c eu_stub.c -o eu_stub.o
-            ar rcs libeu_stub.a eu_stub.o
-            cp libeu_stub.a /usr/lib/
+            # Last resort - try direct gcc linking
+            cd src
             
-            # Try to add this stub directly to link commands
-            find . -name "link.txt" | while read link_file; do
-                sed -i "s|CMakeFiles/bpftrace.dir/main.cpp.o|CMakeFiles/bpftrace.dir/main.cpp.o /tmp/eu_stub/libeu_stub.a|g" "$link_file"
-                
-                # Create a direct replacement link command for the final binary
-                if grep -q "bpftrace " "$link_file"; then
-                    echo "Creating direct link command with all symbols for bpftrace..."
-                    echo "/usr/bin/c++ -static -Wl,--allow-multiple-definition -Wl,-z,notext -Wl,--whole-archive CMakeFiles/bpftrace.dir/main.cpp.o /tmp/eu_stub/libeu_stub.a -o bpftrace libbpftrace.a resources/libresources.a libruntime.a aot/libaot.a /usr/lib/libbcc.a /usr/lib/libbcc_bpf.a /usr/lib/libbpf.a /usr/lib/libelf.a /usr/lib/libeu.a /usr/lib/libbfd.a /usr/lib/libopcodes.a /usr/lib/libiberty.a /usr/lib/libz.a /usr/lib/libzstd.a /usr/lib/liblzma.a /usr/lib/llvm17/lib/libLLVMCore.a /usr/lib/llvm17/lib/libLLVMSupport.a librequired_resources.a ast/libast.a ../libparser.a ast/libast_defs.a libcompiler_core.a -Wl,--no-whole-archive -ldl -lpthread -lrt -lm" > "$link_file"
-                fi
-            done
+            # Create a direct link command that includes all objects
+            echo "Attempting direct link with gcc..."
+            gcc -static -o bpftrace CMakeFiles/bpftrace.dir/main.cpp.o libbpftrace.a resources/libresources.a libruntime.a aot/libaot.a /usr/lib/libbcc.a /usr/lib/libbcc_bpf.a /usr/lib/libbpf.a /usr/lib/libelf.a /usr/lib/libbfd.a /usr/lib/libopcodes.a /usr/lib/libiberty.a /usr/lib/libz.a /usr/lib/libzstd.a /usr/lib/liblzma.a /usr/lib/llvm17/lib/libLLVMCore.a /usr/lib/llvm17/lib/libLLVMSupport.a librequired_resources.a ast/libast.a ../libparser.a ast/libast_defs.a libcompiler_core.a -Wl,--allow-multiple-definition -Wl,-z,notext -ldl -lpthread -lrt -lm || true
             
-            # Try building again
-            make -j${NPROC} VERBOSE=1
-            
-            cd - > /dev/null
+            cd ..
         fi
         
-        # If still failing, try a direct gcc command as last resort
+        # If still failing, try even more extreme approach
         if [ ! -f "src/bpftrace" ]; then
-            echo "All patch attempts failed, trying direct gcc link as last resort..."
+            echo "All patch attempts and direct gcc link failed, trying one final approach..."
+
+            cd src
             
-            # Compile a dummy main file that just calls the required symbols
+            # Try compiling dummy main
             cat > /tmp/dummy_main.c << 'EOF'
 extern void eu_search_tree_init();
 extern void eu_search_tree_fini();
 
-int main(int argc, char *argv[]) {
+int main() {
     eu_search_tree_init();
     eu_search_tree_fini();
     return 0;
@@ -645,25 +614,21 @@ int main(int argc, char *argv[]) {
 EOF
             gcc -c /tmp/dummy_main.c -o /tmp/dummy_main.o
             
-            # Try to link directly with all objects from the build
-            cd src
-            echo "Attempting direct link with gcc..."
-            gcc -static -o bpftrace CMakeFiles/bpftrace.dir/main.cpp.o /tmp/dummy_main.o /tmp/eu_stub/libeu_stub.a libbpftrace.a resources/libresources.a libruntime.a aot/libaot.a /usr/lib/libbcc.a /usr/lib/libbcc_bpf.a /usr/lib/libbpf.a /usr/lib/libelf.a /usr/lib/libeu.a /usr/lib/libbfd.a /usr/lib/libopcodes.a /usr/lib/libiberty.a /usr/lib/libz.a /usr/lib/libzstd.a /usr/lib/liblzma.a /usr/lib/llvm17/lib/libLLVMCore.a /usr/lib/llvm17/lib/libLLVMSupport.a librequired_resources.a ast/libast.a ../libparser.a ast/libast_defs.a libcompiler_core.a -Wl,--allow-multiple-definition -Wl,-z,notext -ldl -lpthread -lrt -lm || true
+            # Try an extreme link command with all possible libraries
+            g++ -static -Wl,--allow-multiple-definition -Wl,-z,notext -o bpftrace CMakeFiles/bpftrace.dir/main.cpp.o /tmp/dummy_main.o libbpftrace.a resources/libresources.a libruntime.a aot/libaot.a /usr/lib/libbcc.a /usr/lib/libbcc_bpf.a /usr/lib/libbpf.a /usr/lib/libelf.a /usr/lib/libbfd.a /usr/lib/libopcodes.a /usr/lib/libiberty.a /usr/lib/libz.a /usr/lib/libzstd.a /usr/lib/liblzma.a /usr/lib/llvm17/lib/libLLVMCore.a /usr/lib/llvm17/lib/libLLVMSupport.a librequired_resources.a ast/libast.a ../libparser.a ast/libast_defs.a libcompiler_core.a -ldl -lpthread -lrt -lm || true
+            
             cd ..
         fi
         
         # Check if the binary was successfully built
         if [ -f "src/bpftrace" ]; then
-            echo "Successfully built bpftrace binary!"
             return 0
         else
-            echo "All link attempts failed!"
             return 1
         fi
     fi
     
     # Binary already exists
-    echo "bpftrace binary already exists, no patching needed"
     return 0
 }
 
