@@ -45,6 +45,41 @@ if [ ! -f "${SRC_DIR}/CMakeLists.txt" ]; then
 fi
 
 #===================================
+# Forcefully remove libpcap
+#===================================
+echo "===== 强制禁用和移除 libpcap 库 ====="
+# 移除 libpcap 库和开发包
+if [ -f "/usr/lib/libpcap.a" ]; then
+    echo "Backing up and removing libpcap.a..."
+    mv /usr/lib/libpcap.a /usr/lib/libpcap.a.bak || true
+fi
+if [ -f "/usr/lib/libpcap.so" ]; then
+    echo "Backing up and removing libpcap.so..."
+    mv /usr/lib/libpcap.so /usr/lib/libpcap.so.bak || true
+fi
+if [ -d "/usr/include/pcap" ]; then
+    echo "Backing up and removing pcap headers..."
+    mkdir -p /tmp/pcap_headers_bak
+    cp -r /usr/include/pcap/* /tmp/pcap_headers_bak/ || true
+    rm -rf /usr/include/pcap/* || true
+fi
+
+# 创建一个空的 libpcap.a 存根
+echo "Creating empty libpcap.a stub..."
+mkdir -p /tmp/pcap_stub
+cd /tmp/pcap_stub
+cat > empty_pcap.c << 'EOF'
+// Empty stub to replace libpcap
+void pcap_nametoeproto() {}
+void pcap_stub() {}
+EOF
+gcc -c empty_pcap.c -o empty_pcap.o
+ar rcs libpcap.a empty_pcap.o
+cp libpcap.a /usr/lib/
+cd "${SRC_DIR}"
+rm -rf /tmp/pcap_stub
+
+#===================================
 # Patch libelf.a directly
 #===================================
 echo "===== 开始修补 libelf.a 以添加缺失的 eu_search_tree 符号 ====="
@@ -246,13 +281,17 @@ if [ -f "${SRC_DIR}/CMakeLists.txt" ]; then
         sed -i 's/find_package(GTest REQUIRED)/find_package(GTest QUIET)/g' "${SRC_DIR}/CMakeLists.txt"
     fi
     
-    # Disable libpcap if causing issues
-    echo "Patching CMakeLists.txt to handle libpcap issues..."
-    if grep -q "find_package(PCAP)" "${SRC_DIR}/CMakeLists.txt"; then
-        sed -i 's/find_package(PCAP)/find_package(PCAP QUIET)/g' "${SRC_DIR}/CMakeLists.txt"
-        # Make USE_LIBPCAP optional instead of required
-        sed -i 's/option(USE_LIBPCAP "Use libpcap" ON)/option(USE_LIBPCAP "Use libpcap" OFF)/g' "${SRC_DIR}/CMakeLists.txt"
-    fi
+    # 彻底禁用 libpcap - 修改 CMakeLists.txt
+    echo "强制禁用 libpcap..."
+    sed -i 's/find_package(PCAP)/# find_package(PCAP) - DISABLED/g' "${SRC_DIR}/CMakeLists.txt"
+    sed -i 's/option(USE_LIBPCAP "Use libpcap" ON)/option(USE_LIBPCAP "Use libpcap" OFF)/g' "${SRC_DIR}/CMakeLists.txt"
+    
+    # 直接将 HAVE_LIBPCAP 定义为 0
+    sed -i 's/define HAVE_LIBPCAP 1/define HAVE_LIBPCAP 0/g' "${SRC_DIR}/CMakeLists.txt"
+    
+    # 删除任何与 libpcap 相关的链接指令
+    sed -i '/PCAP_LIBRARIES/d' "${SRC_DIR}/CMakeLists.txt"
+    sed -i '/PCAP_INCLUDE_DIRS/d' "${SRC_DIR}/CMakeLists.txt"
 else
     echo "CMakeLists.txt not found in expected location, searching for it..."
     find "${SRC_DIR}" -name CMakeLists.txt -exec grep -l "bpftrace requires libbpf.*or greater" {} \; | while read file; do
@@ -266,13 +305,24 @@ else
         sed -i 's/find_package(GTest REQUIRED)/find_package(GTest QUIET)/g' "$file"
     done
     
-    # Search and patch PCAP requirements in any CMakeLists.txt
+    # Search and patch PCAP requirements in any CMakeLists.txt - 彻底禁用
     find "${SRC_DIR}" -name CMakeLists.txt -exec grep -l "find_package(PCAP)" {} \; | while read file; do
-        echo "Patching PCAP requirement in $file"
-        sed -i 's/find_package(PCAP)/find_package(PCAP QUIET)/g' "$file"
+        echo "强制禁用 libpcap 在 $file"
+        sed -i 's/find_package(PCAP)/# find_package(PCAP) - DISABLED/g' "$file"
         sed -i 's/option(USE_LIBPCAP "Use libpcap" ON)/option(USE_LIBPCAP "Use libpcap" OFF)/g' "$file"
+        sed -i 's/define HAVE_LIBPCAP 1/define HAVE_LIBPCAP 0/g' "$file"
+        sed -i '/PCAP_LIBRARIES/d' "$file"
+        sed -i '/PCAP_INCLUDE_DIRS/d' "$file"
     done
 fi
+
+# 修改源代码中的 PCAP 相关条件编译代码
+echo "检查和修改源代码中的 PCAP 条件编译..."
+find "${SRC_DIR}/src" -name "*.cpp" -o -name "*.h" | xargs grep -l "HAVE_LIBPCAP" | while read file; do
+    echo "修改 PCAP 条件编译在 $file"
+    sed -i 's/#if HAVE_LIBPCAP/#if 0 \/\/ HAVE_LIBPCAP disabled/g' "$file"
+    sed -i 's/#ifdef HAVE_LIBPCAP/#if 0 \/\/ HAVE_LIBPCAP disabled/g' "$file"
+done
 
 #===================================
 # Custom CMake Modules
@@ -339,15 +389,16 @@ include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(GTest DEFAULT_MSG GTEST_FOUND)
 EOF
 
-# Create a custom FindPCAP.cmake to disable PCAP
+# Create a custom FindPCAP.cmake to FULLY disable PCAP
 cat > "${SRC_DIR}/cmake/modules/FindPCAP.cmake" << 'EOF'
-# Custom FindPCAP.cmake that disables PCAP due to PIC issues
+# Custom FindPCAP.cmake that completely disables PCAP
 set(PCAP_FOUND FALSE)
 set(PCAP_INCLUDE_DIRS "")
 set(PCAP_LIBRARIES "")
-set(PCAP_DEFINITIONS "")
+set(PCAP_DEFINITIONS "-DHAVE_LIBPCAP=0")
 
-message(STATUS "PCAP support disabled to avoid PIC issues in static build")
+# 强制禁用 PCAP 支持并告知 CMake 这是有意而为
+message(STATUS "PCAP support completely disabled for static build")
 
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(PCAP DEFAULT_MSG PCAP_FOUND)
@@ -376,6 +427,9 @@ configure_and_build() {
         -DLLVM_REQUESTED_VERSION=17 \
         -DUSE_LLVM_GTEST=OFF \
         -DUSE_LIBPCAP=OFF \
+        -DHAVE_LIBPCAP=0 \
+        -DCMAKE_CXX_FLAGS="-DHAVE_LIBPCAP=0" \
+        -DCMAKE_C_FLAGS="-DHAVE_LIBPCAP=0" \
         -DCMAKE_MODULE_PATH=${SRC_DIR}/cmake/modules:/usr/local/share/cmake/Modules || true
 
     # Check if configuration succeeded
@@ -400,6 +454,9 @@ configure_and_build() {
         -DHAVE_CLANG_PARSER=OFF \
         -DUSE_LLVM_GTEST=OFF \
         -DUSE_LIBPCAP=OFF \
+        -DHAVE_LIBPCAP=0 \
+        -DCMAKE_CXX_FLAGS="-DHAVE_LIBPCAP=0" \
+        -DCMAKE_C_FLAGS="-DHAVE_LIBPCAP=0" \
         -DCMAKE_MODULE_PATH=${SRC_DIR}/cmake/modules:/usr/local/share/cmake/Modules || true
 
     # Check if configuration succeeded
@@ -472,6 +529,9 @@ EOF
         -DHAVE_BCC_CREATE_MAP=OFF \
         -DHAVE_BFD_DISASM=OFF \
         -DUSE_LIBPCAP=OFF \
+        -DHAVE_LIBPCAP=0 \
+        -DCMAKE_CXX_FLAGS="-DHAVE_LIBPCAP=0" \
+        -DCMAKE_C_FLAGS="-DHAVE_LIBPCAP=0" \
         -DUSE_LLVM_GTEST=OFF \
         -DCMAKE_MODULE_PATH=${SRC_DIR}/cmake/minimal:${SRC_DIR}/cmake/modules:/usr/local/share/cmake/Modules || true
 
@@ -519,6 +579,9 @@ EOF
         -DHAVE_BCC_CREATE_MAP=OFF \
         -DHAVE_BFD_DISASM=OFF \
         -DUSE_LIBPCAP=OFF \
+        -DHAVE_LIBPCAP=0 \
+        -DCMAKE_CXX_FLAGS="-DHAVE_LIBPCAP=0" \
+        -DCMAKE_C_FLAGS="-DHAVE_LIBPCAP=0" \
         -DUSE_LLVM=OFF \
         -DUSE_LLVM_GTEST=OFF \
         -DCMAKE_MODULE_PATH=${SRC_DIR}/cmake/minimal:${SRC_DIR}/cmake/modules:/usr/local/share/cmake/Modules
@@ -564,9 +627,14 @@ patch_links_and_rebuild() {
             # Make a backup of the original file
             cp "${link_file}" "${link_file}.orig"
             
-            # Remove references to problematic libraries
+            # 彻底移除所有 libpcap 相关引用
             sed -i 's/\/usr\/lib\/libpcap.a//g' "$link_file"
             sed -i 's/-lpcap//g' "$link_file"
+            sed -i 's/ pcap / /g' "$link_file"
+            sed -i 's/ pcap$/ /g' "$link_file"
+            sed -i 's/^pcap //g' "$link_file"
+            
+            # 移除其他有问题的库
             sed -i 's/-lLLVMTestingSupport//g' "$link_file"
             sed -i 's/-lLLVMTestingAnnotations//g' "$link_file"
             sed -i 's/-lLLVMFrontendOpenMP//g' "$link_file"
@@ -590,7 +658,7 @@ patch_links_and_rebuild() {
             if grep -q "bpftrace " "$link_file"; then
                 echo "Creating direct link command for bpftrace..."
                 
-                # Extreme solution - write a completely new link command
+                # 完全自定义链接命令，排除 libpcap
                 echo "/usr/bin/c++ -static -Wl,--allow-multiple-definition -Wl,-z,notext -Wl,--whole-archive CMakeFiles/bpftrace.dir/main.cpp.o -o bpftrace libbpftrace.a resources/libresources.a libruntime.a aot/libaot.a /usr/lib/libbcc.a /usr/lib/libbcc_bpf.a /usr/lib/libbpf.a /usr/lib/libelf.a /usr/lib/libbfd.a /usr/lib/libopcodes.a /usr/lib/libiberty.a /usr/lib/libz.a /usr/lib/libzstd.a /usr/lib/liblzma.a /usr/lib/llvm17/lib/libLLVMCore.a /usr/lib/llvm17/lib/libLLVMSupport.a librequired_resources.a ast/libast.a ../libparser.a ast/libast_defs.a libcompiler_core.a -Wl,--no-whole-archive -ldl -lpthread -lrt -lm" > "$link_file"
             fi
         done
