@@ -426,53 +426,90 @@ fi
 #===================================
 # Build Process
 #===================================
-# 完全重写编译过程，使用全新方法，不进行sed替换
+# 清除之前的构建
+echo "=== Cleaning previous build artifacts ==="
+make clean || true
 
-# 第一步：尝试正常构建
+# 首先尝试正常构建
 echo "=== Starting initial build ==="
 make -j${NPROC} VERBOSE=1 || true  # 即使失败也继续执行
 
-# 第二步：查找并备份原始link.txt文件
-echo "=== Checking for link.txt files ==="
-LINK_FILES=$(find . -name "link.txt")
-
-if [ -z "$LINK_FILES" ]; then
-    echo "No link.txt files found, something went wrong with the build"
-    exit 1
-fi
-
-for link_file in $LINK_FILES; do
+# 修复特定文件的链接命令 - 主要是bpftrace和runtime
+echo "=== Patching link commands ==="
+for link_file in $(find . -name "link.txt"); do
     echo "Found link file: $link_file"
-    # 备份原始文件
-    cp "$link_file" "${link_file}.bak"
     
-    # 获取文件内容以分析
-    LINK_CONTENT=$(cat "$link_file")
-    echo "Original link command content:"
-    echo "$LINK_CONTENT"
-    
-    # 检查是否包含bpftrace编译指令
-    if grep -q "bpftrace" "$link_file"; then
-        echo "This is the bpftrace binary link command, will rewrite it"
+    # 只处理包含特定问题库的链接命令
+    if grep -q "LLVMfrontenddriver\|LLVMFrontenddriver\|llvm_gtest\|LLVMTestingAnnotations\|LLVMTestingSupport\|LLVMFrontendOpenMP\|LLVMFrontendOffloading" "$link_file"; then
+        echo "This link file contains problematic libraries, patching..."
         
-        # 从原始命令中提取库列表和输出目标
-        # 这将捕获所有.a和.o文件以及输出(-o 后面的部分)
-        LIBS=$(echo "$LINK_CONTENT" | grep -o "[^ ]*\.\(a\|o\)" | tr '\n' ' ')
-        OUTPUT=$(echo "$LINK_CONTENT" | grep -o "\-o [^ ]*" | head -1)
+        # 备份原始文件
+        cp "$link_file" "${link_file}.bak"
         
-        # 构建新的链接命令 - 简单明了，没有额外选项
-        NEW_LINK_CMD="/usr/bin/c++ -O3 -DNDEBUG -static -Wl,--allow-multiple-definition $LIBS $OUTPUT"
+        # 移除对问题库的引用，保留其他内容
+        sed -i 's/-lLLVMTestingSupport//g' "$link_file"
+        sed -i 's/-lLLVMTestingAnnotations//g' "$link_file"
+        sed -i 's/-lLLVMFrontendOpenMP//g' "$link_file"
+        sed -i 's/-lLLVMFrontenddriver//g' "$link_file"
+        sed -i 's/-lLLVMfrontenddriver//g' "$link_file"
+        sed -i 's/-lLLVMFrontendOffloading//g' "$link_file"
+        sed -i 's/-lllvm_gtest//g' "$link_file"
+        sed -i 's/-lllvm_gtest_main//g' "$link_file"
         
-        echo "Rewriting link command to:"
-        echo "$NEW_LINK_CMD"
+        # 修复错误格式的选项
+        sed -i 's/--allow-multiple-definition-libgcc/--allow-multiple-definition/g' "$link_file"
+        sed -i 's/--allow-multiple-definition-libstdc++/--allow-multiple-definition/g' "$link_file"
         
-        # 将新命令写入文件
-        echo "$NEW_LINK_CMD" > "$link_file"
+        # 确保我们有--allow-multiple-definition选项
+        if ! grep -q -- "--allow-multiple-definition" "$link_file"; then
+            # 添加--allow-multiple-definition选项
+            if grep -q -- "-static" "$link_file"; then
+                # 如果有-static选项，在它后面添加
+                sed -i 's/-static/-static -Wl,--allow-multiple-definition/g' "$link_file"
+            else
+                # 否则在命令开头添加
+                compiler=$(head -n 1 "$link_file" | awk '{print $1}')
+                flags=$(head -n 1 "$link_file" | sed "s|^$compiler ||")
+                echo "$compiler -static -Wl,--allow-multiple-definition $flags" > "$link_file"
+            fi
+        fi
+        
+        # 修复任何连在一起的选项
+        sed -i 's/-static-Wl,/-static -Wl,/g' "$link_file"
+        
+        # 特别处理可能包含格式错误的库引用
+        # 修复运行时链接命令中的错误格式
+        if grep -q "libruntime.a  " "$link_file"; then
+            sed -i 's/libruntime.a  /libruntime.a /g' "$link_file"
+        fi
+        
+        # 检查是否有连在一起的库引用（没有空格分隔）
+        content=$(cat "$link_file")
+        if grep -q ".o libruntime.a" "$link_file"; then
+            # 如果有连在一起的库引用，使用更直接的方法重写链接命令
+            echo "Found incorrectly formatted library references, completely rebuilding link command"
+            
+            # 获取编译器和基本标志
+            compiler=$(echo "$content" | awk '{print $1}')
+            
+            # 从输出中提取标志和库
+            flags=$(echo "$content" | grep -o -- "-O[0-9] -D[^ ]*")
+            objects=$(echo "$content" | grep -o "[^ ]*\.o" | tr '\n' ' ')
+            libraries=$(echo "$content" | grep -o "/usr/lib[^ ]*/lib[^ ]*\.a" | tr '\n' ' ')
+            output=$(echo "$content" | grep -o -- "-o [^ ]*" | head -1)
+            
+            # 构建新的链接命令
+            new_cmd="$compiler $flags -static -Wl,--allow-multiple-definition $objects $libraries $output"
+            echo "$new_cmd" > "$link_file"
+        fi
+        
+        echo "Patched link command:"
+        cat "$link_file"
     fi
 done
 
-# 第三步：使用新的链接命令重新构建
-echo "=== Rebuilding with fixed link commands ==="
+# 重新构建
+echo "=== Rebuilding with patched link commands ==="
 make -j${NPROC} VERBOSE=1
 
 #===================================
