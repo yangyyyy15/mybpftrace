@@ -81,7 +81,6 @@ CRITICAL_LIBS=(
     "/usr/lib/llvm17/lib/libLLVMTestingSupport.a"
     "/usr/lib/llvm17/lib/libLLVMFrontendOpenMP.a"
     "/usr/lib/llvm17/lib/libLLVMFrontenddriver.a" 
-    "/usr/lib/llvm17/lib/libLLVMfrontenddriver.a"  # 添加小写版本
     "/usr/lib/llvm17/lib/libLLVMFrontendOffloading.a"
     "/usr/lib/llvm17/lib/libLLVMOrcJIT.a"
     
@@ -99,15 +98,6 @@ CRITICAL_LIBS=(
 for lib in "${CRITICAL_LIBS[@]}"; do
     create_stub_lib "$lib"
 done
-
-# 创建大小写变体之间的符号链接
-if [ -f "/usr/lib/llvm17/lib/libLLVMFrontenddriver.a" ] && [ ! -f "/usr/lib/llvm17/lib/libLLVMfrontenddriver.a" ]; then
-    ln -sf "/usr/lib/llvm17/lib/libLLVMFrontenddriver.a" "/usr/lib/llvm17/lib/libLLVMfrontenddriver.a"
-fi
-
-if [ -f "/usr/lib/llvm17/lib/libLLVMfrontenddriver.a" ] && [ ! -f "/usr/lib/llvm17/lib/libLLVMFrontenddriver.a" ]; then
-    ln -sf "/usr/lib/llvm17/lib/libLLVMfrontenddriver.a" "/usr/lib/llvm17/lib/libLLVMFrontenddriver.a"
-fi
 
 # Scan all CMake files and create any other missing library stubs
 for cmake_file in $(find /usr/lib/llvm17 -name "*.cmake" -type f 2>/dev/null); do
@@ -248,6 +238,29 @@ EOF
 mkdir -p build
 cd build
 
+# Function to fix malformed linker flags
+fix_linker_flags() {
+    echo "Checking for incorrect linker flags..."
+    find . -name "link.txt" | while read link_file; do
+        # Check for and fix malformed --allow-multiple-definition-* flags
+        if grep -q -- "--allow-multiple-definition-libgcc" "$link_file"; then
+            echo "Fixing malformed --allow-multiple-definition-libgcc in ${link_file}"
+            sed -i 's/--allow-multiple-definition-libgcc/--allow-multiple-definition/g' "$link_file"
+        fi
+        
+        if grep -q -- "--allow-multiple-definition-libstdc++" "$link_file"; then
+            echo "Fixing malformed --allow-multiple-definition-libstdc++ in ${link_file}"
+            sed -i 's/--allow-multiple-definition-libstdc++/--allow-multiple-definition/g' "$link_file"
+        fi
+        
+        # Also check for any other potential bad flags
+        if grep -q -- "--allow-multiple-definition-" "$link_file"; then
+            echo "Fixing other malformed --allow-multiple-definition-* flags in ${link_file}"
+            sed -i 's/--allow-multiple-definition-[^[:space:]]*/--allow-multiple-definition/g' "$link_file"
+        fi
+    done
+}
+
 # Try three different configurations in order of preference
 configure_and_build() {
     # Primary configuration with testing disabled
@@ -263,7 +276,8 @@ configure_and_build() {
         -DLIBBCC_LIBRARIES=/usr/lib/libbcc.a \
         -DLLVM_REQUESTED_VERSION=17 \
         -DUSE_LLVM_GTEST=OFF \
-        -DCMAKE_MODULE_PATH=/bpftrace/cmake/modules:/usr/local/share/cmake/Modules || true
+        -DCMAKE_MODULE_PATH=/bpftrace/cmake/modules:/usr/local/share/cmake/Modules \
+        -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-multiple-definition" || true
 
     # Check if configuration succeeded
     if [ -f "Makefile" ]; then
@@ -286,7 +300,8 @@ configure_and_build() {
         -DWITH_LIBPOLLY=OFF \
         -DHAVE_CLANG_PARSER=OFF \
         -DUSE_LLVM_GTEST=OFF \
-        -DCMAKE_MODULE_PATH=/bpftrace/cmake/modules:/usr/local/share/cmake/Modules || true
+        -DCMAKE_MODULE_PATH=/bpftrace/cmake/modules:/usr/local/share/cmake/Modules \
+        -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-multiple-definition" || true
 
     # Check if configuration succeeded
     if [ -f "Makefile" ]; then
@@ -351,7 +366,8 @@ EOF
         -DHAVE_BFD_DISASM=OFF \
         -DUSE_LIBPCAP=OFF \
         -DUSE_LLVM_GTEST=OFF \
-        -DCMAKE_MODULE_PATH=/bpftrace/cmake/minimal:/bpftrace/cmake/modules:/usr/local/share/cmake/Modules || true
+        -DCMAKE_MODULE_PATH=/bpftrace/cmake/minimal:/bpftrace/cmake/modules:/usr/local/share/cmake/Modules \
+        -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-multiple-definition" || true
 
     # Check if configuration succeeded
     if [ -f "Makefile" ]; then
@@ -399,7 +415,8 @@ EOF
         -DUSE_LIBPCAP=OFF \
         -DUSE_LLVM=OFF \
         -DUSE_LLVM_GTEST=OFF \
-        -DCMAKE_MODULE_PATH=/bpftrace/cmake/minimal:/bpftrace/cmake/modules:/usr/local/share/cmake/Modules
+        -DCMAKE_MODULE_PATH=/bpftrace/cmake/minimal:/bpftrace/cmake/modules:/usr/local/share/cmake/Modules \
+        -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-multiple-definition"
 
     # Check if configuration succeeded
     if [ -f "Makefile" ]; then
@@ -426,91 +443,64 @@ fi
 #===================================
 # Build Process
 #===================================
-# 清除之前的构建
-echo "=== Cleaning previous build artifacts ==="
-make clean || true
+# Build bpftrace
+echo "=== Building bpftrace ==="
 
-# 首先尝试正常构建
-echo "=== Starting initial build ==="
-make -j${NPROC} VERBOSE=1 || true  # 即使失败也继续执行
+# Fix any incorrect linker flags before building
+fix_linker_flags
 
-# 修复特定文件的链接命令 - 主要是bpftrace和runtime
-echo "=== Patching link commands ==="
-for link_file in $(find . -name "link.txt"); do
-    echo "Found link file: $link_file"
-    
-    # 只处理包含特定问题库的链接命令
-    if grep -q "LLVMfrontenddriver\|LLVMFrontenddriver\|llvm_gtest\|LLVMTestingAnnotations\|LLVMTestingSupport\|LLVMFrontendOpenMP\|LLVMFrontendOffloading" "$link_file"; then
-        echo "This link file contains problematic libraries, patching..."
-        
-        # 备份原始文件
-        cp "$link_file" "${link_file}.bak"
-        
-        # 移除对问题库的引用，保留其他内容
-        sed -i 's/-lLLVMTestingSupport//g' "$link_file"
-        sed -i 's/-lLLVMTestingAnnotations//g' "$link_file"
-        sed -i 's/-lLLVMFrontendOpenMP//g' "$link_file"
-        sed -i 's/-lLLVMFrontenddriver//g' "$link_file"
-        sed -i 's/-lLLVMfrontenddriver//g' "$link_file"
-        sed -i 's/-lLLVMFrontendOffloading//g' "$link_file"
-        sed -i 's/-lllvm_gtest//g' "$link_file"
-        sed -i 's/-lllvm_gtest_main//g' "$link_file"
-        
-        # 修复错误格式的选项
-        sed -i 's/--allow-multiple-definition-libgcc/--allow-multiple-definition/g' "$link_file"
-        sed -i 's/--allow-multiple-definition-libstdc++/--allow-multiple-definition/g' "$link_file"
-        
-        # 确保我们有--allow-multiple-definition选项
-        if ! grep -q -- "--allow-multiple-definition" "$link_file"; then
-            # 添加--allow-multiple-definition选项
-            if grep -q -- "-static" "$link_file"; then
-                # 如果有-static选项，在它后面添加
-                sed -i 's/-static/-static -Wl,--allow-multiple-definition/g' "$link_file"
-            else
-                # 否则在命令开头添加
-                compiler=$(head -n 1 "$link_file" | awk '{print $1}')
-                flags=$(head -n 1 "$link_file" | sed "s|^$compiler ||")
-                echo "$compiler -static -Wl,--allow-multiple-definition $flags" > "$link_file"
-            fi
-        fi
-        
-        # 修复任何连在一起的选项
-        sed -i 's/-static-Wl,/-static -Wl,/g' "$link_file"
-        
-        # 特别处理可能包含格式错误的库引用
-        # 修复运行时链接命令中的错误格式
-        if grep -q "libruntime.a  " "$link_file"; then
-            sed -i 's/libruntime.a  /libruntime.a /g' "$link_file"
-        fi
-        
-        # 检查是否有连在一起的库引用（没有空格分隔）
-        content=$(cat "$link_file")
-        if grep -q ".o libruntime.a" "$link_file"; then
-            # 如果有连在一起的库引用，使用更直接的方法重写链接命令
-            echo "Found incorrectly formatted library references, completely rebuilding link command"
-            
-            # 获取编译器和基本标志
-            compiler=$(echo "$content" | awk '{print $1}')
-            
-            # 从输出中提取标志和库
-            flags=$(echo "$content" | grep -o -- "-O[0-9] -D[^ ]*")
-            objects=$(echo "$content" | grep -o "[^ ]*\.o" | tr '\n' ' ')
-            libraries=$(echo "$content" | grep -o "/usr/lib[^ ]*/lib[^ ]*\.a" | tr '\n' ' ')
-            output=$(echo "$content" | grep -o -- "-o [^ ]*" | head -1)
-            
-            # 构建新的链接命令
-            new_cmd="$compiler $flags -static -Wl,--allow-multiple-definition $objects $libraries $output"
-            echo "$new_cmd" > "$link_file"
-        fi
-        
-        echo "Patched link command:"
-        cat "$link_file"
-    fi
-done
-
-# 重新构建
-echo "=== Rebuilding with patched link commands ==="
 make -j${NPROC} VERBOSE=1
+
+# Patch link commands if needed
+patch_links_and_rebuild() {
+    if [ ! -f "src/bpftrace" ]; then
+        echo "Build failed, trying to patch link commands..."
+        
+        # Fix any incorrect linker flags again
+        fix_linker_flags
+        
+        find . -name "link.txt" | while read link_file; do
+            echo "Patching ${link_file}"
+            
+            # Remove references to problematic libraries
+            sed -i 's/-lLLVMTestingSupport//g' "$link_file"
+            sed -i 's/-lLLVMTestingAnnotations//g' "$link_file"
+            sed -i 's/-lLLVMFrontendOpenMP//g' "$link_file"
+            sed -i 's/-lLLVMFrontenddriver//g' "$link_file"
+            sed -i 's/-lLLVMFrontendOffloading//g' "$link_file"
+            sed -i 's/-lllvm_gtest//g' "$link_file"
+            sed -i 's/-lllvm_gtest_main//g' "$link_file"
+            
+            # Add static linking flags if not present
+            if ! grep -q -- "-static" "$link_file"; then
+                sed -i 's/CMakeFiles\/bpftrace.dir\/main.cpp.o/CMakeFiles\/bpftrace.dir\/main.cpp.o -static/g' "$link_file"
+            fi
+            
+            # Add multiple definition allowance
+            if ! grep -q -- "--allow-multiple-definition" "$link_file"; then
+                sed -i 's/-static/-static -Wl,--allow-multiple-definition/g' "$link_file"
+            fi
+        done
+        
+        # Try building again
+        make -j${NPROC} VERBOSE=1
+        
+        # Check if the binary was successfully built
+        if [ -f "src/bpftrace" ]; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+    
+    # Binary already exists
+    return 0
+}
+
+# If the first build attempt failed, try to patch and rebuild
+if [ ! -f "src/bpftrace" ]; then
+    patch_links_and_rebuild
+fi
 
 #===================================
 # Package Creation
