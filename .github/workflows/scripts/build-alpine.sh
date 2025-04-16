@@ -4,6 +4,10 @@ set -ex
 # Get number of CPU cores for parallel build
 NPROC=$(nproc)
 
+# 定义源码目录变量 - 非常重要
+SRC_DIR="/bpftrace"
+BUILD_DIR="${SRC_DIR}/build"
+
 #===================================
 # Environment Diagnostics
 #===================================
@@ -26,6 +30,19 @@ echo "LLVM components:"
 find /usr/lib/llvm17/lib -name "*.a" | sort
 echo "LLVM include directories:"
 find /usr/include -name "llvm" -type d
+
+# 检查源代码目录是否存在
+if [ ! -d "${SRC_DIR}" ]; then
+    echo "ERROR: Source directory ${SRC_DIR} not found!"
+    exit 1
+fi
+
+# 确认CMakeLists.txt存在
+if [ ! -f "${SRC_DIR}/CMakeLists.txt" ]; then
+    echo "ERROR: CMakeLists.txt not found in ${SRC_DIR}!"
+    find "${SRC_DIR}" -name "CMakeLists.txt" || echo "No CMakeLists.txt found in any subdirectory"
+    exit 1
+fi
 
 #===================================
 # Patch libelf.a directly
@@ -80,8 +97,8 @@ cp patched_libelf.a /usr/lib/libelf.a
 echo "验证修补后的 libelf.a 中是否包含所需符号："
 nm /usr/lib/libelf.a | grep eu_search_tree
 
-# 清理
-cd /
+# 清理并返回源代码目录
+cd "${SRC_DIR}"
 rm -rf /tmp/patch_libelf
 
 echo "libelf.a 修补完成！"
@@ -216,41 +233,41 @@ fi
 # CMakeLists Patch
 #===================================
 # Find and patch CMakeLists.txt to bypass libbpf version check if needed
-if [ -f "/bpftrace/CMakeLists.txt" ]; then
-    echo "Checking for version requirement in /bpftrace/CMakeLists.txt"
-    if grep -q "bpftrace requires libbpf.*or greater" /bpftrace/CMakeLists.txt; then
+if [ -f "${SRC_DIR}/CMakeLists.txt" ]; then
+    echo "Checking for version requirement in ${SRC_DIR}/CMakeLists.txt"
+    if grep -q "bpftrace requires libbpf.*or greater" "${SRC_DIR}/CMakeLists.txt"; then
         echo "Bypassing libbpf version check..."
-        sed -i 's/message(FATAL_ERROR "bpftrace requires libbpf.*or greater")/message(WARNING "Bypassing libbpf version check")/g' /bpftrace/CMakeLists.txt
+        sed -i 's/message(FATAL_ERROR "bpftrace requires libbpf.*or greater")/message(WARNING "Bypassing libbpf version check")/g' "${SRC_DIR}/CMakeLists.txt"
     fi
     
     # Also patch any LLVM test requirements if present
-    if grep -q "find_package(GTest REQUIRED)" /bpftrace/CMakeLists.txt; then
+    if grep -q "find_package(GTest REQUIRED)" "${SRC_DIR}/CMakeLists.txt"; then
         echo "Bypassing GTest requirement..."
-        sed -i 's/find_package(GTest REQUIRED)/find_package(GTest QUIET)/g' /bpftrace/CMakeLists.txt
+        sed -i 's/find_package(GTest REQUIRED)/find_package(GTest QUIET)/g' "${SRC_DIR}/CMakeLists.txt"
     fi
     
     # Disable libpcap if causing issues
     echo "Patching CMakeLists.txt to handle libpcap issues..."
-    if grep -q "find_package(PCAP)" /bpftrace/CMakeLists.txt; then
-        sed -i 's/find_package(PCAP)/find_package(PCAP QUIET)/g' /bpftrace/CMakeLists.txt
+    if grep -q "find_package(PCAP)" "${SRC_DIR}/CMakeLists.txt"; then
+        sed -i 's/find_package(PCAP)/find_package(PCAP QUIET)/g' "${SRC_DIR}/CMakeLists.txt"
         # Make USE_LIBPCAP optional instead of required
-        sed -i 's/option(USE_LIBPCAP "Use libpcap" ON)/option(USE_LIBPCAP "Use libpcap" OFF)/g' /bpftrace/CMakeLists.txt
+        sed -i 's/option(USE_LIBPCAP "Use libpcap" ON)/option(USE_LIBPCAP "Use libpcap" OFF)/g' "${SRC_DIR}/CMakeLists.txt"
     fi
 else
     echo "CMakeLists.txt not found in expected location, searching for it..."
-    find /bpftrace -name CMakeLists.txt -exec grep -l "bpftrace requires libbpf.*or greater" {} \; | while read file; do
+    find "${SRC_DIR}" -name CMakeLists.txt -exec grep -l "bpftrace requires libbpf.*or greater" {} \; | while read file; do
         echo "Patching $file"
         sed -i 's/message(FATAL_ERROR "bpftrace requires libbpf.*or greater")/message(WARNING "Bypassing libbpf version check")/g' "$file"
     done
     
     # Search and patch GTest requirements in any CMakeLists.txt
-    find /bpftrace -name CMakeLists.txt -exec grep -l "find_package(GTest REQUIRED)" {} \; | while read file; do
+    find "${SRC_DIR}" -name CMakeLists.txt -exec grep -l "find_package(GTest REQUIRED)" {} \; | while read file; do
         echo "Patching GTest requirement in $file"
         sed -i 's/find_package(GTest REQUIRED)/find_package(GTest QUIET)/g' "$file"
     done
     
     # Search and patch PCAP requirements in any CMakeLists.txt
-    find /bpftrace -name CMakeLists.txt -exec grep -l "find_package(PCAP)" {} \; | while read file; do
+    find "${SRC_DIR}" -name CMakeLists.txt -exec grep -l "find_package(PCAP)" {} \; | while read file; do
         echo "Patching PCAP requirement in $file"
         sed -i 's/find_package(PCAP)/find_package(PCAP QUIET)/g' "$file"
         sed -i 's/option(USE_LIBPCAP "Use libpcap" ON)/option(USE_LIBPCAP "Use libpcap" OFF)/g' "$file"
@@ -261,10 +278,10 @@ fi
 # Custom CMake Modules
 #===================================
 # Create custom cmake directory if it doesn't exist
-mkdir -p /bpftrace/cmake/modules
+mkdir -p "${SRC_DIR}/cmake/modules"
 
 # Create a custom FindLLVM.cmake file
-cat > /bpftrace/cmake/modules/FindLLVM.cmake << 'EOF'
+cat > "${SRC_DIR}/cmake/modules/FindLLVM.cmake" << 'EOF'
 # Custom FindLLVM.cmake that bypasses problematic components
 set(LLVM_FOUND TRUE)
 set(LLVM_INCLUDE_DIRS "/usr/include/llvm17")
@@ -310,7 +327,7 @@ find_package_handle_standard_args(LLVM DEFAULT_MSG LLVM_FOUND)
 EOF
 
 # Create a custom FindGTest.cmake file to help avoid gtest issues
-cat > /bpftrace/cmake/modules/FindGTest.cmake << 'EOF'
+cat > "${SRC_DIR}/cmake/modules/FindGTest.cmake" << 'EOF'
 # Custom FindGTest.cmake that provides minimal stubs
 set(GTEST_FOUND TRUE)
 set(GTEST_INCLUDE_DIRS "/usr/include")
@@ -323,7 +340,7 @@ find_package_handle_standard_args(GTest DEFAULT_MSG GTEST_FOUND)
 EOF
 
 # Create a custom FindPCAP.cmake to disable PCAP
-cat > /bpftrace/cmake/modules/FindPCAP.cmake << 'EOF'
+cat > "${SRC_DIR}/cmake/modules/FindPCAP.cmake" << 'EOF'
 # Custom FindPCAP.cmake that disables PCAP due to PIC issues
 set(PCAP_FOUND FALSE)
 set(PCAP_INCLUDE_DIRS "")
@@ -340,14 +357,14 @@ EOF
 # Build Configuration and Process
 #===================================
 # Create a build directory
-mkdir -p build
-cd build
+mkdir -p "${BUILD_DIR}"
+cd "${BUILD_DIR}"
 
 # Try three different configurations in order of preference
 configure_and_build() {
     # Primary configuration with testing disabled
     echo "=== Trying primary CMake configuration ==="
-    cmake .. \
+    cmake "${SRC_DIR}" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_VERBOSE_MAKEFILE=ON \
         -DBUILD_TESTING=OFF \
@@ -359,7 +376,7 @@ configure_and_build() {
         -DLLVM_REQUESTED_VERSION=17 \
         -DUSE_LLVM_GTEST=OFF \
         -DUSE_LIBPCAP=OFF \
-        -DCMAKE_MODULE_PATH=/bpftrace/cmake/modules:/usr/local/share/cmake/Modules || true
+        -DCMAKE_MODULE_PATH=${SRC_DIR}/cmake/modules:/usr/local/share/cmake/Modules || true
 
     # Check if configuration succeeded
     if [ -f "Makefile" ]; then
@@ -369,7 +386,7 @@ configure_and_build() {
 
     # Alternative configuration - disable some features
     echo "=== Primary configuration failed, trying alternative configuration ==="
-    cmake .. \
+    cmake "${SRC_DIR}" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_VERBOSE_MAKEFILE=ON \
         -DBUILD_TESTING=OFF \
@@ -383,7 +400,7 @@ configure_and_build() {
         -DHAVE_CLANG_PARSER=OFF \
         -DUSE_LLVM_GTEST=OFF \
         -DUSE_LIBPCAP=OFF \
-        -DCMAKE_MODULE_PATH=/bpftrace/cmake/modules:/usr/local/share/cmake/Modules || true
+        -DCMAKE_MODULE_PATH=${SRC_DIR}/cmake/modules:/usr/local/share/cmake/Modules || true
 
     # Check if configuration succeeded
     if [ -f "Makefile" ]; then
@@ -394,9 +411,9 @@ configure_and_build() {
     # Minimal configuration - disable most features
     echo "=== Alternative configuration failed, trying minimal configuration ==="
     # Create custom CMake modules for direct library handling
-    mkdir -p /bpftrace/cmake/minimal
+    mkdir -p "${SRC_DIR}/cmake/minimal"
   
-    cat > /bpftrace/cmake/minimal/LLVMExports.cmake << 'EOF'
+    cat > "${SRC_DIR}/cmake/minimal/LLVMExports.cmake" << 'EOF'
 # Minimal LLVMExports.cmake to bypass problematic components
 # Create imported targets for core LLVM libraries
 if(NOT TARGET LLVMCore)
@@ -439,7 +456,7 @@ if(NOT TARGET LLVMfrontenddriver)
 endif()
 EOF
   
-    cmake .. \
+    cmake "${SRC_DIR}" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_VERBOSE_MAKEFILE=ON \
         -DBUILD_TESTING=OFF \
@@ -456,7 +473,7 @@ EOF
         -DHAVE_BFD_DISASM=OFF \
         -DUSE_LIBPCAP=OFF \
         -DUSE_LLVM_GTEST=OFF \
-        -DCMAKE_MODULE_PATH=/bpftrace/cmake/minimal:/bpftrace/cmake/modules:/usr/local/share/cmake/Modules || true
+        -DCMAKE_MODULE_PATH=${SRC_DIR}/cmake/minimal:${SRC_DIR}/cmake/modules:/usr/local/share/cmake/Modules || true
 
     # Check if configuration succeeded
     if [ -f "Makefile" ]; then
@@ -468,7 +485,7 @@ EOF
     echo "=== Trying fallback minimal configuration ==="
     
     # Create an override module for LLVM
-    cat > /bpftrace/cmake/minimal/LLVMConfig.cmake << 'EOF'
+    cat > "${SRC_DIR}/cmake/minimal/LLVMConfig.cmake" << 'EOF'
 # Minimal LLVMConfig.cmake that completely bypasses all non-essential components
 set(LLVM_FOUND TRUE)
 set(LLVM_INCLUDE_DIRS "/usr/include/llvm17")
@@ -486,7 +503,7 @@ set(LLVM_ABI_BREAKING_CHECKS NONE)
 set(LLVM_BUILD_GLOBAL_ISEL OFF)
 EOF
 
-    cmake .. \
+    cmake "${SRC_DIR}" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_VERBOSE_MAKEFILE=ON \
         -DBUILD_TESTING=OFF \
@@ -504,7 +521,7 @@ EOF
         -DUSE_LIBPCAP=OFF \
         -DUSE_LLVM=OFF \
         -DUSE_LLVM_GTEST=OFF \
-        -DCMAKE_MODULE_PATH=/bpftrace/cmake/minimal:/bpftrace/cmake/modules:/usr/local/share/cmake/Modules
+        -DCMAKE_MODULE_PATH=${SRC_DIR}/cmake/minimal:${SRC_DIR}/cmake/modules:/usr/local/share/cmake/Modules
 
     # Check if configuration succeeded
     if [ -f "Makefile" ]; then
@@ -654,17 +671,14 @@ if [ -f "src/bpftrace" ]; then
     cp src/bpftrace release/aarch64/
     
     # Copy tools if available
-    if [ -d "../tools" ]; then
-        cp -r ../tools release/aarch64/
-        chmod +x release/aarch64/tools/*.bt 2>/dev/null || true
-    elif [ -d "/bpftrace/tools" ]; then
-        cp -r /bpftrace/tools release/aarch64/
+    if [ -d "${SRC_DIR}/tools" ]; then
+        cp -r "${SRC_DIR}/tools" release/aarch64/
         chmod +x release/aarch64/tools/*.bt 2>/dev/null || true
     fi
     
     # Create tarball 
     cd release
-    tar -czf /bpftrace/bpftrace-alpine-static.tar.gz aarch64
+    tar -czf "${SRC_DIR}/bpftrace-alpine-static.tar.gz" aarch64
     echo "Package created: bpftrace-alpine-static.tar.gz"
     
     exit 0
