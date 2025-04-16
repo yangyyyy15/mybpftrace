@@ -1,0 +1,195 @@
+# Dockerfile for building static bpftrace with musl libc
+FROM alpine:3.19
+
+# Add edge testing repository for some packages
+RUN echo "https://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/apk/repositories && \
+    echo "https://dl-cdn.alpinelinux.org/alpine/edge/main" >> /etc/apk/repositories
+
+# Install required packages
+RUN apk add --update \
+  asciidoctor \
+  argp-standalone \
+  bash \
+  binutils-dev \
+  bison \
+  bpftrace \
+  bcc-dev \
+  bcc-static \
+  bzip2-dev \
+  bzip2-static \
+  build-base \
+  cereal \
+  clang17-dev \
+  clang17-extra-tools \
+  clang17-libs \
+  clang17-static \
+  cmake \
+  elfutils \
+  elfutils-dev \
+  flex-dev \
+  git \
+  libbpf-dev \
+  libelf-static \
+  libpcap-dev \
+  libc6-compat \
+  linux-headers \
+  llvm17-dev \
+  llvm17-static \
+  musl-dev \
+  openssl-dev \
+  python3 \
+  wget \
+  xxd \
+  xz-dev \
+  xz-static \
+  zlib-dev \
+  zlib-static \
+  zstd-dev \
+  zstd-static \
+  grep \
+  sed \
+  findutils
+
+# Create required symbolic links
+RUN ln -s /usr/lib/llvm17/lib/libclang-cpp.a /usr/lib/libclang-cpp.a && \
+    ln -s /usr/lib/llvm17/lib/libclang.a /usr/lib/libclang.a && \
+    ln -s /usr/include/llvm17/llvm /usr/include/llvm && \
+    ln -s /usr/include/llvm17/llvm-c /usr/include/llvm-c && \
+    ln -s /usr/include/clang17 /usr/include/clang
+
+# Fix LLVM expecting to use shared zstd lib by modifying the config
+RUN find /usr -name "*.cmake" -type f -exec grep -l "zstd::libzstd_shared" {} \; | \
+    xargs -r sed -i 's/zstd::libzstd_shared/zstd::libzstd_static/g'
+
+# Create a symlink for clang cmake files
+RUN ln -s 'clang17' /usr/lib/cmake/clang
+
+# Some versions of Alpine may need this symlink
+RUN if [ ! -e /lib/ld-musl-x86_64.so.1 ] && [ -e /lib/libc.musl-x86_64.so.1 ]; then \
+    ln -s /lib/libc.musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1; \
+fi
+
+# Create stubs for missing LLVM components - including new stubs for gtest
+RUN mkdir -p /tmp/empty && cd /tmp/empty && \
+    echo "void __llvm_stub() {}" > stub.c && \
+    gcc -c stub.c -o stub.o && \
+    mkdir -p /usr/lib/llvm17/lib && \
+    for lib in libLLVMTestingAnnotations.a libLLVMTestingSupport.a libLLVMFrontendOpenMP.a libLLVMFrontenddriver.a libLLVMfrontenddriver.a libLLVMFrontendOffloading.a libLLVMOrcJIT.a libllvm_gtest.a libllvm_gtest_main.a libclangdRemoteIndex.a libclangDaemon.a libclangDaemonTweaks.a libclangdMain.a; do \
+        echo "Creating stub for $lib"; \
+        ar rcs /usr/lib/llvm17/lib/$lib stub.o; \
+    done && \
+    # 创建大小写变体的符号链接 (特别针对frontend/Frontend问题)
+    ln -sf /usr/lib/llvm17/lib/libLLVMFrontenddriver.a /usr/lib/llvm17/lib/libLLVMfrontenddriver.a && \
+    # Additional stubs for libclang libraries
+    for lib in libclangBasic.a libclangAPINotes.a libclangLex.a libclangParse.a libclangAST.a libclangDynamicASTMatchers.a libclangASTMatchers.a libclangCrossTU.a libclangSema.a libclangCodeGen.a libclangAnalysis.a libclangAnalysisFlowSensitive.a libclangAnalysisFlowSensitiveModels.a; do \
+        echo "Creating stub for $lib"; \
+        ar rcs /usr/lib/llvm17/lib/$lib stub.o; \
+    done && \
+    # List created stub libraries
+    echo "Stub libraries created:" && \
+    ls -la /usr/lib/llvm17/lib/*.a
+
+# 直接修补 libelf.a 库，添加缺失的 eu_search_tree 符号 - 使用多个echo命令而非heredoc
+RUN mkdir -p /tmp/patch_libelf && cd /tmp/patch_libelf && \
+    echo "void eu_search_tree_init() {}" > eu_stubs.c && \
+    echo "void eu_search_tree_fini() {}" >> eu_stubs.c && \
+    echo "void eu_search_tree_findidx() {}" >> eu_stubs.c && \
+    echo "void eu_search_tree_free() {}" >> eu_stubs.c && \
+    echo "void eu_search_tree_insert() {}" >> eu_stubs.c && \
+    gcc -c eu_stubs.c -o eu_stubs.o && \
+    # 创建一个备份
+    cp /usr/lib/libelf.a /usr/lib/libelf.a.original && \
+    # 提取所有目标文件
+    mkdir -p extracted && \
+    cd extracted && \
+    ar x /usr/lib/libelf.a && \
+    cd .. && \
+    # 将存根目标文件添加到目标文件集合中
+    cp eu_stubs.o extracted/ && \
+    # 重新创建 libelf.a 库
+    ar rcs patched_libelf.a extracted/*.o && \
+    # 使用修补的库替换原始库
+    cp patched_libelf.a /usr/lib/libelf.a && \
+    # 验证库中的符号
+    nm /usr/lib/libelf.a | grep eu_search_tree && \
+    # 清理
+    cd / && \
+    rm -rf /tmp/patch_libelf
+
+# Disable PCAP to avoid PIC issues (修补 CMake 中的 FindPCAP 模块)
+RUN mkdir -p /usr/local/share/cmake/Modules && \
+    echo "# Custom FindPCAP.cmake that disables PCAP due to PIC issues" > /usr/local/share/cmake/Modules/FindPCAP.cmake && \
+    echo "set(PCAP_FOUND FALSE)" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
+    echo "set(PCAP_INCLUDE_DIRS \"\")" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
+    echo "set(PCAP_LIBRARIES \"\")" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
+    echo "message(STATUS \"PCAP support disabled to avoid PIC issues in static build\")" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
+    echo "include(FindPackageHandleStandardArgs)" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
+    echo "find_package_handle_standard_args(PCAP DEFAULT_MSG PCAP_FOUND)" >> /usr/local/share/cmake/Modules/FindPCAP.cmake
+
+# Compile and install newer libbpf version
+RUN apk add --no-cache git make gcc musl-dev elfutils-dev && \
+    cd /tmp && \
+    git clone https://github.com/libbpf/libbpf.git && \
+    cd libbpf && \
+    git checkout v1.5.0 && \
+    cd src && \
+    make -j$(nproc) && \
+    DESTDIR=/usr make install_headers && \
+    DESTDIR=/usr make install_uapi_headers && \
+    DESTDIR=/usr make install && \
+    echo "Installed libbpf version:" && \
+    cat /usr/include/bpf/libbpf_version.h
+
+# Create custom cmake modules directory
+RUN mkdir -p /usr/local/share/cmake/Modules
+
+# Copy our custom FindLLVM.cmake module
+COPY custom-FindLLVM.cmake /usr/local/share/cmake/Modules/FindLLVM.cmake
+
+# Create a custom LLVMExports.cmake to override or patch problematic declarations
+RUN mkdir -p /usr/lib/llvm17/lib/cmake/llvm && \
+    echo "# Custom patch for LLVMExports.cmake to prevent errors with missing gtest libraries" > /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    echo "if (NOT TARGET llvm_gtest AND EXISTS \"/usr/lib/llvm17/lib/libllvm_gtest.a\")" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    echo "  add_library(llvm_gtest STATIC IMPORTED)" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    echo "  set_target_properties(llvm_gtest PROPERTIES IMPORTED_LOCATION \"/usr/lib/llvm17/lib/libllvm_gtest.a\")" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    echo "endif()" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    echo "if (NOT TARGET llvm_gtest_main AND EXISTS \"/usr/lib/llvm17/lib/libllvm_gtest_main.a\")" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    echo "  add_library(llvm_gtest_main STATIC IMPORTED)" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    echo "  set_target_properties(llvm_gtest_main PROPERTIES IMPORTED_LOCATION \"/usr/lib/llvm17/lib/libllvm_gtest_main.a\")" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    echo "endif()" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    # 添加小写版本的frontend driver库定义
+    echo "if (NOT TARGET LLVMfrontenddriver AND EXISTS \"/usr/lib/llvm17/lib/libLLVMfrontenddriver.a\")" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    echo "  add_library(LLVMfrontenddriver STATIC IMPORTED)" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    echo "  set_target_properties(LLVMfrontenddriver PROPERTIES IMPORTED_LOCATION \"/usr/lib/llvm17/lib/libLLVMfrontenddriver.a\")" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    echo "endif()" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMTestPatch.cmake && \
+    # Patch the original LLVMExports.cmake to include our patch
+    if [ -f "/usr/lib/llvm17/lib/cmake/llvm/LLVMExports.cmake" ]; then \
+      echo "include(\${CMAKE_CURRENT_LIST_DIR}/LLVMTestPatch.cmake)" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMExports.cmake; \
+    fi
+
+# If bcc-dev doesn't provide all needed files, compile from source
+RUN if [ ! -f "/usr/include/bcc/bcc_version.h" ]; then \
+    apk add --no-cache cmake git python3 llvm17-dev clang17-dev flex-dev bison \
+                       build-base linux-headers elfutils-dev python3-dev && \
+    git clone https://github.com/iovisor/bcc.git /tmp/bcc && \
+    cd /tmp/bcc && \
+    git checkout v0.28.0 && \
+    mkdir build && \
+    cd build && \
+    cmake -DCMAKE_INSTALL_PREFIX=/usr \
+          -DENABLE_LLVM_SHARED=0 \
+          -DCMAKE_C_COMPILER=/usr/bin/clang \
+          -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+          .. && \
+    make -j$(nproc) && \
+    make install && \
+    cd / && rm -rf /tmp/bcc; \
+fi
+
+# Copy the build script
+COPY build-alpine.sh /build-alpine.sh
+RUN chmod +x /build-alpine.sh
+
+# Set the working directory and entrypoint
+WORKDIR /bpftrace
+ENTRYPOINT ["/build-alpine.sh"]
