@@ -89,18 +89,44 @@ RUN mkdir -p /tmp/empty && cd /tmp/empty && \
     echo "Stub libraries created:" && \
     ls -la /usr/lib/llvm17/lib/*.a
 
-# Create stubs for missing eu_search_tree functions
-RUN mkdir -p /tmp/eu_stub && cd /tmp/eu_stub && \
-    echo "void eu_search_tree_init() {}" > eu_stub.c && \
-    echo "void eu_search_tree_fini() {}" >> eu_stub.c && \
-    echo "void eu_search_tree_findidx() {}" >> eu_stub.c && \
-    echo "void eu_search_tree_free() {}" >> eu_stub.c && \
-    echo "void eu_search_tree_insert() {}" >> eu_stub.c && \
-    gcc -c eu_stub.c -o eu_stub.o && \
-    mkdir -p /usr/lib && \
-    ar rcs /usr/lib/libeu.a eu_stub.o && \
-    echo "Created stub for libeu.a with eu_search_tree functions" && \
-    cd / && rm -rf /tmp/eu_stub
+# 直接修补 libelf.a 库，添加缺失的符号 - 不再创建单独的 libeu.a
+RUN mkdir -p /tmp/patch_libelf && cd /tmp/patch_libelf && \
+    cat > eu_stubs.c << 'EOF' && \
+void eu_search_tree_init() {}
+void eu_search_tree_fini() {}
+void eu_search_tree_findidx() {}
+void eu_search_tree_free() {}
+void eu_search_tree_insert() {}
+EOF
+    gcc -c eu_stubs.c -o eu_stubs.o && \
+    # 创建一个备份
+    cp /usr/lib/libelf.a /usr/lib/libelf.a.original && \
+    # 提取所有目标文件
+    mkdir -p extracted && \
+    cd extracted && \
+    ar x /usr/lib/libelf.a && \
+    cd .. && \
+    # 将存根目标文件添加到目标文件集合中
+    cp eu_stubs.o extracted/ && \
+    # 重新创建 libelf.a 库
+    ar rcs patched_libelf.a extracted/*.o && \
+    # 使用修补的库替换原始库
+    cp patched_libelf.a /usr/lib/libelf.a && \
+    # 验证库中的符号
+    nm /usr/lib/libelf.a | grep eu_search_tree && \
+    # 清理
+    cd / && \
+    rm -rf /tmp/patch_libelf
+
+# Disable PCAP to avoid PIC issues (修补 CMake 中的 FindPCAP 模块)
+RUN mkdir -p /usr/local/share/cmake/Modules && \
+    echo "# Custom FindPCAP.cmake that disables PCAP due to PIC issues" > /usr/local/share/cmake/Modules/FindPCAP.cmake && \
+    echo "set(PCAP_FOUND FALSE)" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
+    echo "set(PCAP_INCLUDE_DIRS \"\")" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
+    echo "set(PCAP_LIBRARIES \"\")" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
+    echo "message(STATUS \"PCAP support disabled to avoid PIC issues in static build\")" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
+    echo "include(FindPackageHandleStandardArgs)" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
+    echo "find_package_handle_standard_args(PCAP DEFAULT_MSG PCAP_FOUND)" >> /usr/local/share/cmake/Modules/FindPCAP.cmake
 
 # Compile and install newer libbpf version
 RUN apk add --no-cache git make gcc musl-dev elfutils-dev && \
@@ -142,16 +168,6 @@ RUN mkdir -p /usr/lib/llvm17/lib/cmake/llvm && \
     if [ -f "/usr/lib/llvm17/lib/cmake/llvm/LLVMExports.cmake" ]; then \
       echo "include(\${CMAKE_CURRENT_LIST_DIR}/LLVMTestPatch.cmake)" >> /usr/lib/llvm17/lib/cmake/llvm/LLVMExports.cmake; \
     fi
-
-# Disable PCAP to avoid PIC issues
-RUN mkdir -p /usr/local/share/cmake/Modules && \
-    echo "# Custom FindPCAP.cmake that disables PCAP due to PIC issues" > /usr/local/share/cmake/Modules/FindPCAP.cmake && \
-    echo "set(PCAP_FOUND FALSE)" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
-    echo "set(PCAP_INCLUDE_DIRS \"\")" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
-    echo "set(PCAP_LIBRARIES \"\")" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
-    echo "message(STATUS \"PCAP support disabled to avoid PIC issues in static build\")" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
-    echo "include(FindPackageHandleStandardArgs)" >> /usr/local/share/cmake/Modules/FindPCAP.cmake && \
-    echo "find_package_handle_standard_args(PCAP DEFAULT_MSG PCAP_FOUND)" >> /usr/local/share/cmake/Modules/FindPCAP.cmake
 
 # If bcc-dev doesn't provide all needed files, compile from source
 RUN if [ ! -f "/usr/include/bcc/bcc_version.h" ]; then \
