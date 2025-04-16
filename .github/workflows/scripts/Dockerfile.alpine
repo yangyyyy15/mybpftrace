@@ -89,15 +89,13 @@ RUN mkdir -p /tmp/empty && cd /tmp/empty && \
     echo "Stub libraries created:" && \
     ls -la /usr/lib/llvm17/lib/*.a
 
-# 直接修补 libelf.a 库，添加缺失的符号 - 不再创建单独的 libeu.a
+# 直接修补 libelf.a 库，添加缺失的 eu_search_tree 符号 - 使用多个echo命令而非heredoc
 RUN mkdir -p /tmp/patch_libelf && cd /tmp/patch_libelf && \
-    cat > eu_stubs.c << 'EOF' && \
-void eu_search_tree_init() {}
-void eu_search_tree_fini() {}
-void eu_search_tree_findidx() {}
-void eu_search_tree_free() {}
-void eu_search_tree_insert() {}
-EOF
+    echo "void eu_search_tree_init() {}" > eu_stubs.c && \
+    echo "void eu_search_tree_fini() {}" >> eu_stubs.c && \
+    echo "void eu_search_tree_findidx() {}" >> eu_stubs.c && \
+    echo "void eu_search_tree_free() {}" >> eu_stubs.c && \
+    echo "void eu_search_tree_insert() {}" >> eu_stubs.c && \
     gcc -c eu_stubs.c -o eu_stubs.o && \
     # 创建一个备份
     cp /usr/lib/libelf.a /usr/lib/libelf.a.original && \
