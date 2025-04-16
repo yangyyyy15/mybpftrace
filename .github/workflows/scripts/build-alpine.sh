@@ -426,54 +426,53 @@ fi
 #===================================
 # Build Process
 #===================================
-# Build bpftrace
-echo "=== Building bpftrace ==="
+# 完全重写编译过程，使用全新方法，不进行sed替换
+
+# 第一步：尝试正常构建
+echo "=== Starting initial build ==="
 make -j${NPROC} VERBOSE=1 || true  # 即使失败也继续执行
 
-# 无论初始构建是否成功，都尝试修补链接命令
-echo "Patching link commands to handle problematic libraries..."
-find . -name "link.txt" | while read link_file; do
-    echo "Patching ${link_file}"
-    
-    # Remove references to problematic libraries
-    sed -i 's/-lLLVMTestingSupport//g' "$link_file"
-    sed -i 's/-lLLVMTestingAnnotations//g' "$link_file"
-    sed -i 's/-lLLVMFrontendOpenMP//g' "$link_file"
-    sed -i 's/-lLLVMFrontenddriver//g' "$link_file"
-    sed -i 's/-lLLVMfrontenddriver//g' "$link_file"  # 同时处理小写版本
-    sed -i 's/-lLLVMFrontendOffloading//g' "$link_file"
-    sed -i 's/-lllvm_gtest//g' "$link_file"
-    sed -i 's/-lllvm_gtest_main//g' "$link_file"
-    
-    # 清理错误格式的选项
-    sed -i 's/--allow-multiple-definition-libgcc/--allow-multiple-definition/g' "$link_file"
-    sed -i 's/--allow-multiple-definition-libstdc++/--allow-multiple-definition/g' "$link_file"
-    
-    # 确保只有一次添加--allow-multiple-definition
-    if ! grep -q -- "--allow-multiple-definition" "$link_file"; then
-        # 在第一个-static标志后添加--allow-multiple-definition选项
-        sed -i 's/-static/-static -Wl,--allow-multiple-definition/g' "$link_file"
-    else
-        # 如果已经存在--allow-multiple-definition，确保不重复添加
-        echo "--allow-multiple-definition already exists, not adding again"
-    fi
-    
-    # 修复可能损坏的链接选项
-    # 将任何连在一起的选项分开
-    sed -i 's/-static-Wl,/-static -Wl,/g' "$link_file"
-    
-    # 确保静态链接的正确格式 (主要是针对-static而不是-static-lib*)
-    if ! grep -q -- "^-static " "$link_file" && ! grep -q -- " -static " "$link_file"; then
-        # 在开头添加-static选项
-        sed -i 's/CMakeFiles\/bpftrace.dir\/main.cpp.o/-static CMakeFiles\/bpftrace.dir\/main.cpp.o/g' "$link_file"
-    fi
+# 第二步：查找并备份原始link.txt文件
+echo "=== Checking for link.txt files ==="
+LINK_FILES=$(find . -name "link.txt")
 
-    # 打印修改后的链接命令
-    echo "Modified link command:"
-    cat "$link_file"
+if [ -z "$LINK_FILES" ]; then
+    echo "No link.txt files found, something went wrong with the build"
+    exit 1
+fi
+
+for link_file in $LINK_FILES; do
+    echo "Found link file: $link_file"
+    # 备份原始文件
+    cp "$link_file" "${link_file}.bak"
+    
+    # 获取文件内容以分析
+    LINK_CONTENT=$(cat "$link_file")
+    echo "Original link command content:"
+    echo "$LINK_CONTENT"
+    
+    # 检查是否包含bpftrace编译指令
+    if grep -q "bpftrace" "$link_file"; then
+        echo "This is the bpftrace binary link command, will rewrite it"
+        
+        # 从原始命令中提取库列表和输出目标
+        # 这将捕获所有.a和.o文件以及输出(-o 后面的部分)
+        LIBS=$(echo "$LINK_CONTENT" | grep -o "[^ ]*\.\(a\|o\)" | tr '\n' ' ')
+        OUTPUT=$(echo "$LINK_CONTENT" | grep -o "\-o [^ ]*" | head -1)
+        
+        # 构建新的链接命令 - 简单明了，没有额外选项
+        NEW_LINK_CMD="/usr/bin/c++ -O3 -DNDEBUG -static -Wl,--allow-multiple-definition $LIBS $OUTPUT"
+        
+        echo "Rewriting link command to:"
+        echo "$NEW_LINK_CMD"
+        
+        # 将新命令写入文件
+        echo "$NEW_LINK_CMD" > "$link_file"
+    fi
 done
 
-# Try building again
+# 第三步：使用新的链接命令重新构建
+echo "=== Rebuilding with fixed link commands ==="
 make -j${NPROC} VERBOSE=1
 
 #===================================
