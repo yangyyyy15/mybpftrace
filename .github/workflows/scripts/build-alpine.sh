@@ -428,8 +428,10 @@ configure_and_build() {
         -DUSE_LLVM_GTEST=OFF \
         -DUSE_LIBPCAP=OFF \
         -DHAVE_LIBPCAP=0 \
-        -DCMAKE_CXX_FLAGS="-DHAVE_LIBPCAP=0" \
-        -DCMAKE_C_FLAGS="-DHAVE_LIBPCAP=0" \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=OFF \
+        -DCMAKE_CXX_FLAGS="-DHAVE_LIBPCAP=0 -ffunction-sections -fdata-sections" \
+        -DCMAKE_C_FLAGS="-DHAVE_LIBPCAP=0 -ffunction-sections -fdata-sections" \
+        -DCMAKE_EXE_LINKER_FLAGS="-static -no-pie -Wl,--gc-sections -Wl,--no-dynamic-linker -Wl,--strip-all" \
         -DCMAKE_MODULE_PATH=${SRC_DIR}/cmake/modules:/usr/local/share/cmake/Modules || true
 
     # Check if configuration succeeded
@@ -455,8 +457,10 @@ configure_and_build() {
         -DUSE_LLVM_GTEST=OFF \
         -DUSE_LIBPCAP=OFF \
         -DHAVE_LIBPCAP=0 \
-        -DCMAKE_CXX_FLAGS="-DHAVE_LIBPCAP=0" \
-        -DCMAKE_C_FLAGS="-DHAVE_LIBPCAP=0" \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=OFF \
+        -DCMAKE_CXX_FLAGS="-DHAVE_LIBPCAP=0 -ffunction-sections -fdata-sections" \
+        -DCMAKE_C_FLAGS="-DHAVE_LIBPCAP=0 -ffunction-sections -fdata-sections" \
+        -DCMAKE_EXE_LINKER_FLAGS="-static -no-pie -Wl,--gc-sections -Wl,--no-dynamic-linker -Wl,--strip-all" \
         -DCMAKE_MODULE_PATH=${SRC_DIR}/cmake/modules:/usr/local/share/cmake/Modules || true
 
     # Check if configuration succeeded
@@ -530,8 +534,10 @@ EOF
         -DHAVE_BFD_DISASM=OFF \
         -DUSE_LIBPCAP=OFF \
         -DHAVE_LIBPCAP=0 \
-        -DCMAKE_CXX_FLAGS="-DHAVE_LIBPCAP=0" \
-        -DCMAKE_C_FLAGS="-DHAVE_LIBPCAP=0" \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=OFF \
+        -DCMAKE_CXX_FLAGS="-DHAVE_LIBPCAP=0 -ffunction-sections -fdata-sections" \
+        -DCMAKE_C_FLAGS="-DHAVE_LIBPCAP=0 -ffunction-sections -fdata-sections" \
+        -DCMAKE_EXE_LINKER_FLAGS="-static -no-pie -Wl,--gc-sections -Wl,--no-dynamic-linker -Wl,--strip-all" \
         -DUSE_LLVM_GTEST=OFF \
         -DCMAKE_MODULE_PATH=${SRC_DIR}/cmake/minimal:${SRC_DIR}/cmake/modules:/usr/local/share/cmake/Modules || true
 
@@ -580,8 +586,10 @@ EOF
         -DHAVE_BFD_DISASM=OFF \
         -DUSE_LIBPCAP=OFF \
         -DHAVE_LIBPCAP=0 \
-        -DCMAKE_CXX_FLAGS="-DHAVE_LIBPCAP=0" \
-        -DCMAKE_C_FLAGS="-DHAVE_LIBPCAP=0" \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=OFF \
+        -DCMAKE_CXX_FLAGS="-DHAVE_LIBPCAP=0 -ffunction-sections -fdata-sections" \
+        -DCMAKE_C_FLAGS="-DHAVE_LIBPCAP=0 -ffunction-sections -fdata-sections" \
+        -DCMAKE_EXE_LINKER_FLAGS="-static -no-pie -Wl,--gc-sections -Wl,--no-dynamic-linker -Wl,--strip-all" \
         -DUSE_LLVM=OFF \
         -DUSE_LLVM_GTEST=OFF \
         -DCMAKE_MODULE_PATH=${SRC_DIR}/cmake/minimal:${SRC_DIR}/cmake/modules:/usr/local/share/cmake/Modules
@@ -646,20 +654,23 @@ patch_links_and_rebuild() {
             
             # Add static linking flags if not present
             if ! grep -q -- "-static" "$link_file"; then
-                sed -i 's/CMakeFiles\/bpftrace.dir\/main.cpp.o/CMakeFiles\/bpftrace.dir\/main.cpp.o -static/g' "$link_file"
+                sed -i 's/CMakeFiles\/bpftrace.dir\/main.cpp.o/CMakeFiles\/bpftrace.dir\/main.cpp.o -static -no-pie/g' "$link_file"
             fi
+            
+            # 确保禁用PIE
+            sed -i 's/-static/-static -no-pie/g' "$link_file"
             
             # Add multiple definition allowance and other linker options for relocatable code
             if ! grep -q -- "--allow-multiple-definition" "$link_file"; then
-                sed -i 's/-static/-static -Wl,--allow-multiple-definition -Wl,-z,notext/g' "$link_file"
+                sed -i 's/-no-pie/-no-pie -Wl,--allow-multiple-definition -Wl,--gc-sections -Wl,--no-dynamic-linker -Wl,--strip-all -Wl,-z,notext/g' "$link_file"
             fi
 
             # If this is the final bpftrace link command, completely replace it
             if grep -q "bpftrace " "$link_file"; then
                 echo "Creating direct link command for bpftrace..."
                 
-                # 完全自定义链接命令，排除 libpcap
-                echo "/usr/bin/c++ -static -Wl,--allow-multiple-definition -Wl,-z,notext -Wl,--whole-archive CMakeFiles/bpftrace.dir/main.cpp.o -o bpftrace libbpftrace.a resources/libresources.a libruntime.a aot/libaot.a /usr/lib/libbcc.a /usr/lib/libbcc_bpf.a /usr/lib/libbpf.a /usr/lib/libelf.a /usr/lib/libbfd.a /usr/lib/libopcodes.a /usr/lib/libiberty.a /usr/lib/libz.a /usr/lib/libzstd.a /usr/lib/liblzma.a /usr/lib/llvm17/lib/libLLVMCore.a /usr/lib/llvm17/lib/libLLVMSupport.a librequired_resources.a ast/libast.a ../libparser.a ast/libast_defs.a libcompiler_core.a -Wl,--no-whole-archive -ldl -lpthread -lrt -lm" > "$link_file"
+                # 完全自定义链接命令，排除 libpcap 并强制完全静态链接
+                echo "/usr/bin/c++ -static -no-pie -Wl,--allow-multiple-definition -Wl,--gc-sections -Wl,--no-dynamic-linker -Wl,--strip-all -Wl,-z,notext -Wl,--whole-archive CMakeFiles/bpftrace.dir/main.cpp.o -o bpftrace libbpftrace.a resources/libresources.a libruntime.a aot/libaot.a /usr/lib/libbcc.a /usr/lib/libbcc_bpf.a /usr/lib/libbpf.a /usr/lib/libelf.a /usr/lib/libbfd.a /usr/lib/libopcodes.a /usr/lib/libiberty.a /usr/lib/libz.a /usr/lib/libzstd.a /usr/lib/liblzma.a /usr/lib/llvm17/lib/libLLVMCore.a /usr/lib/llvm17/lib/libLLVMSupport.a librequired_resources.a ast/libast.a ../libparser.a ast/libast_defs.a libcompiler_core.a -Wl,--no-whole-archive -ldl -lpthread -lrt -lm" > "$link_file"
             fi
         done
         
@@ -675,7 +686,7 @@ patch_links_and_rebuild() {
             
             # Create a direct link command that includes all objects
             echo "Attempting direct link with gcc..."
-            gcc -static -o bpftrace CMakeFiles/bpftrace.dir/main.cpp.o libbpftrace.a resources/libresources.a libruntime.a aot/libaot.a /usr/lib/libbcc.a /usr/lib/libbcc_bpf.a /usr/lib/libbpf.a /usr/lib/libelf.a /usr/lib/libbfd.a /usr/lib/libopcodes.a /usr/lib/libiberty.a /usr/lib/libz.a /usr/lib/libzstd.a /usr/lib/liblzma.a /usr/lib/llvm17/lib/libLLVMCore.a /usr/lib/llvm17/lib/libLLVMSupport.a librequired_resources.a ast/libast.a ../libparser.a ast/libast_defs.a libcompiler_core.a -Wl,--allow-multiple-definition -Wl,-z,notext -ldl -lpthread -lrt -lm || true
+            g++ -static -no-pie -o bpftrace CMakeFiles/bpftrace.dir/main.cpp.o libbpftrace.a resources/libresources.a libruntime.a aot/libaot.a /usr/lib/libbcc.a /usr/lib/libbcc_bpf.a /usr/lib/libbpf.a /usr/lib/libelf.a /usr/lib/libbfd.a /usr/lib/libopcodes.a /usr/lib/libiberty.a /usr/lib/libz.a /usr/lib/libzstd.a /usr/lib/liblzma.a /usr/lib/llvm17/lib/libLLVMCore.a /usr/lib/llvm17/lib/libLLVMSupport.a librequired_resources.a ast/libast.a ../libparser.a ast/libast_defs.a libcompiler_core.a -Wl,--allow-multiple-definition -Wl,--gc-sections -Wl,--no-dynamic-linker -Wl,--strip-all -Wl,-z,notext -ldl -lpthread -lrt -lm || true
             
             cd ..
         fi
@@ -700,7 +711,7 @@ EOF
             gcc -c /tmp/dummy_main.c -o /tmp/dummy_main.o
             
             # Try an extreme link command with all possible libraries
-            g++ -static -Wl,--allow-multiple-definition -Wl,-z,notext -o bpftrace CMakeFiles/bpftrace.dir/main.cpp.o /tmp/dummy_main.o libbpftrace.a resources/libresources.a libruntime.a aot/libaot.a /usr/lib/libbcc.a /usr/lib/libbcc_bpf.a /usr/lib/libbpf.a /usr/lib/libelf.a /usr/lib/libbfd.a /usr/lib/libopcodes.a /usr/lib/libiberty.a /usr/lib/libz.a /usr/lib/libzstd.a /usr/lib/liblzma.a /usr/lib/llvm17/lib/libLLVMCore.a /usr/lib/llvm17/lib/libLLVMSupport.a librequired_resources.a ast/libast.a ../libparser.a ast/libast_defs.a libcompiler_core.a -ldl -lpthread -lrt -lm || true
+            g++ -static -no-pie -Wl,--allow-multiple-definition -Wl,--gc-sections -Wl,--no-dynamic-linker -Wl,--strip-all -Wl,-z,notext -o bpftrace CMakeFiles/bpftrace.dir/main.cpp.o /tmp/dummy_main.o libbpftrace.a resources/libresources.a libruntime.a aot/libaot.a /usr/lib/libbcc.a /usr/lib/libbcc_bpf.a /usr/lib/libbpf.a /usr/lib/libelf.a /usr/lib/libbfd.a /usr/lib/libopcodes.a /usr/lib/libiberty.a /usr/lib/libz.a /usr/lib/libzstd.a /usr/lib/liblzma.a /usr/lib/llvm17/lib/libLLVMCore.a /usr/lib/llvm17/lib/libLLVMSupport.a librequired_resources.a ast/libast.a ../libparser.a ast/libast_defs.a libcompiler_core.a -ldl -lpthread -lrt -lm || true
             
             cd ..
         fi
