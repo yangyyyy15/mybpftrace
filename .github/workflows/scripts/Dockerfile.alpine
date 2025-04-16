@@ -91,15 +91,11 @@ RUN mkdir -p /tmp/empty && cd /tmp/empty && \
 
 # Create stubs for missing eu_search_tree functions
 RUN mkdir -p /tmp/eu_stub && cd /tmp/eu_stub && \
-    cat > eu_stub.c << 'EOF'
-/* Stubs for missing eu_search_tree functions */
-void eu_search_tree_init() {}
-void eu_search_tree_fini() {}
-/* Add other missing functions if needed */
-void eu_search_tree_findidx() {}
-void eu_search_tree_free() {}
-void eu_search_tree_insert() {}
-EOF
+    echo "void eu_search_tree_init() {}" > eu_stub.c && \
+    echo "void eu_search_tree_fini() {}" >> eu_stub.c && \
+    echo "void eu_search_tree_findidx() {}" >> eu_stub.c && \
+    echo "void eu_search_tree_free() {}" >> eu_stub.c && \
+    echo "void eu_search_tree_insert() {}" >> eu_stub.c && \
     gcc -c eu_stub.c -o eu_stub.o && \
     mkdir -p /usr/lib && \
     ar rcs /usr/lib/libeu.a eu_stub.o && \
