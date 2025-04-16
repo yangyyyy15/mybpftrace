@@ -81,6 +81,7 @@ CRITICAL_LIBS=(
     "/usr/lib/llvm17/lib/libLLVMTestingSupport.a"
     "/usr/lib/llvm17/lib/libLLVMFrontendOpenMP.a"
     "/usr/lib/llvm17/lib/libLLVMFrontenddriver.a" 
+    "/usr/lib/llvm17/lib/libLLVMfrontenddriver.a"  # 新增: 小写版本的frontend库
     "/usr/lib/llvm17/lib/libLLVMFrontendOffloading.a"
     "/usr/lib/llvm17/lib/libLLVMOrcJIT.a"
     
@@ -97,6 +98,16 @@ CRITICAL_LIBS=(
 # Create stubs for critical libraries
 for lib in "${CRITICAL_LIBS[@]}"; do
     create_stub_lib "$lib"
+done
+
+# 新增: 创建大小写变体的存根库
+echo "Creating case-variant stubs for frontend libraries..."
+for original in "/usr/lib/llvm17/lib/libLLVMFrontenddriver.a"; do
+    lowercase=$(echo "$original" | sed 's/Frontend/frontend/g')
+    if [ -f "$original" ] && [ ! -f "$lowercase" ]; then
+        echo "Creating lowercase variant: $lowercase"
+        cp "$original" "$lowercase"
+    fi
 done
 
 # Scan all CMake files and create any other missing library stubs
@@ -123,6 +134,12 @@ endif()
 if (NOT TARGET llvm_gtest_main AND EXISTS "/usr/lib/llvm17/lib/libllvm_gtest_main.a")
   add_library(llvm_gtest_main STATIC IMPORTED)
   set_target_properties(llvm_gtest_main PROPERTIES IMPORTED_LOCATION "/usr/lib/llvm17/lib/libllvm_gtest_main.a")
+endif()
+
+# 新增: 处理frontend driver的大小写变体
+if (NOT TARGET LLVMfrontenddriver AND EXISTS "/usr/lib/llvm17/lib/libLLVMfrontenddriver.a")
+  add_library(LLVMfrontenddriver STATIC IMPORTED)
+  set_target_properties(LLVMfrontenddriver PROPERTIES IMPORTED_LOCATION "/usr/lib/llvm17/lib/libLLVMfrontenddriver.a")
 endif()
 EOF
 
@@ -238,29 +255,6 @@ EOF
 mkdir -p build
 cd build
 
-# Function to fix malformed linker flags
-fix_linker_flags() {
-    echo "Checking for incorrect linker flags..."
-    find . -name "link.txt" | while read link_file; do
-        # Check for and fix malformed --allow-multiple-definition-* flags
-        if grep -q -- "--allow-multiple-definition-libgcc" "$link_file"; then
-            echo "Fixing malformed --allow-multiple-definition-libgcc in ${link_file}"
-            sed -i 's/--allow-multiple-definition-libgcc/--allow-multiple-definition/g' "$link_file"
-        fi
-        
-        if grep -q -- "--allow-multiple-definition-libstdc++" "$link_file"; then
-            echo "Fixing malformed --allow-multiple-definition-libstdc++ in ${link_file}"
-            sed -i 's/--allow-multiple-definition-libstdc++/--allow-multiple-definition/g' "$link_file"
-        fi
-        
-        # Also check for any other potential bad flags
-        if grep -q -- "--allow-multiple-definition-" "$link_file"; then
-            echo "Fixing other malformed --allow-multiple-definition-* flags in ${link_file}"
-            sed -i 's/--allow-multiple-definition-[^[:space:]]*/--allow-multiple-definition/g' "$link_file"
-        fi
-    done
-}
-
 # Try three different configurations in order of preference
 configure_and_build() {
     # Primary configuration with testing disabled
@@ -276,8 +270,7 @@ configure_and_build() {
         -DLIBBCC_LIBRARIES=/usr/lib/libbcc.a \
         -DLLVM_REQUESTED_VERSION=17 \
         -DUSE_LLVM_GTEST=OFF \
-        -DCMAKE_MODULE_PATH=/bpftrace/cmake/modules:/usr/local/share/cmake/Modules \
-        -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-multiple-definition" || true
+        -DCMAKE_MODULE_PATH=/bpftrace/cmake/modules:/usr/local/share/cmake/Modules || true
 
     # Check if configuration succeeded
     if [ -f "Makefile" ]; then
@@ -300,8 +293,7 @@ configure_and_build() {
         -DWITH_LIBPOLLY=OFF \
         -DHAVE_CLANG_PARSER=OFF \
         -DUSE_LLVM_GTEST=OFF \
-        -DCMAKE_MODULE_PATH=/bpftrace/cmake/modules:/usr/local/share/cmake/Modules \
-        -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-multiple-definition" || true
+        -DCMAKE_MODULE_PATH=/bpftrace/cmake/modules:/usr/local/share/cmake/Modules || true
 
     # Check if configuration succeeded
     if [ -f "Makefile" ]; then
@@ -347,6 +339,14 @@ if(NOT TARGET llvm_gtest_main)
     IMPORTED_LOCATION "/usr/lib/llvm17/lib/libllvm_gtest_main.a"
   )
 endif()
+
+# 新增: 为LLVMfrontenddriver创建目标定义
+if(NOT TARGET LLVMfrontenddriver)
+  add_library(LLVMfrontenddriver STATIC IMPORTED)
+  set_target_properties(LLVMfrontenddriver PROPERTIES
+    IMPORTED_LOCATION "/usr/lib/llvm17/lib/libLLVMfrontenddriver.a"
+  )
+endif()
 EOF
   
     cmake .. \
@@ -366,8 +366,7 @@ EOF
         -DHAVE_BFD_DISASM=OFF \
         -DUSE_LIBPCAP=OFF \
         -DUSE_LLVM_GTEST=OFF \
-        -DCMAKE_MODULE_PATH=/bpftrace/cmake/minimal:/bpftrace/cmake/modules:/usr/local/share/cmake/Modules \
-        -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-multiple-definition" || true
+        -DCMAKE_MODULE_PATH=/bpftrace/cmake/minimal:/bpftrace/cmake/modules:/usr/local/share/cmake/Modules || true
 
     # Check if configuration succeeded
     if [ -f "Makefile" ]; then
@@ -415,8 +414,7 @@ EOF
         -DUSE_LIBPCAP=OFF \
         -DUSE_LLVM=OFF \
         -DUSE_LLVM_GTEST=OFF \
-        -DCMAKE_MODULE_PATH=/bpftrace/cmake/minimal:/bpftrace/cmake/modules:/usr/local/share/cmake/Modules \
-        -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-multiple-definition"
+        -DCMAKE_MODULE_PATH=/bpftrace/cmake/minimal:/bpftrace/cmake/modules:/usr/local/share/cmake/Modules
 
     # Check if configuration succeeded
     if [ -f "Makefile" ]; then
@@ -445,20 +443,12 @@ fi
 #===================================
 # Build bpftrace
 echo "=== Building bpftrace ==="
-
-# Fix any incorrect linker flags before building
-fix_linker_flags
-
 make -j${NPROC} VERBOSE=1
 
 # Patch link commands if needed
 patch_links_and_rebuild() {
     if [ ! -f "src/bpftrace" ]; then
         echo "Build failed, trying to patch link commands..."
-        
-        # Fix any incorrect linker flags again
-        fix_linker_flags
-        
         find . -name "link.txt" | while read link_file; do
             echo "Patching ${link_file}"
             
@@ -470,6 +460,9 @@ patch_links_and_rebuild() {
             sed -i 's/-lLLVMFrontendOffloading//g' "$link_file"
             sed -i 's/-lllvm_gtest//g' "$link_file"
             sed -i 's/-lllvm_gtest_main//g' "$link_file"
+            
+            # 新增: 移除小写版本的frontend driver依赖
+            sed -i 's/-lLLVMfrontenddriver//g' "$link_file"
             
             # Add static linking flags if not present
             if ! grep -q -- "-static" "$link_file"; then
@@ -497,10 +490,8 @@ patch_links_and_rebuild() {
     return 0
 }
 
-# If the first build attempt failed, try to patch and rebuild
-if [ ! -f "src/bpftrace" ]; then
-    patch_links_and_rebuild
-fi
+# Try to patch link commands and rebuild if necessary
+patch_links_and_rebuild
 
 #===================================
 # Package Creation
